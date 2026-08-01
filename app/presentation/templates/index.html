@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ org_name }} Photobooth — Club Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <main class="booth">
+    <header class="brand">
+      <p class="brand__mark">{{ org_name }}</p>
+      <p class="brand__sub">Club Day Photobooth</p>
+    </header>
+
+    <section class="panel" aria-label="Điều khiển chụp in">
+      <label class="field">
+        <span>Khoa / Ngành</span>
+        <select id="faculty" name="faculty" required>
+          <option value="" disabled selected>— Chọn khoa / ngành —</option>
+          {% for f in faculties %}
+          <option value="{{ f }}">{{ f }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field">
+        <span>URL base QR (phải có <code>{id}</code>)</span>
+        <input
+          id="qrBase"
+          type="url"
+          name="qr_base_url"
+          value="{{ qr_base_url }}"
+          placeholder="https://my-photobooth.app/photo/{id}"
+          required
+        />
+      </label>
+
+      <button id="captureBtn" class="cta" type="button">
+        <span class="cta__label">CHỤP &amp; IN</span>
+        <span class="cta__hint">Sony A7S2 → Layout 58mm → POS58</span>
+      </button>
+
+      <div id="statusBar" class="status" role="status" aria-live="polite">
+        Sẵn sàng. Kiểm tra máy ảnh &amp; máy in trước khi bấm.
+      </div>
+    </section>
+
+    <aside class="preview" hidden id="preview">
+      <h2>Kết quả</h2>
+      <p id="resultMsg"></p>
+      <div class="preview__frames">
+        <figure>
+          <figcaption>Ảnh gốc</figcaption>
+          <img id="photoPreview" alt="Ảnh vừa chụp" />
+        </figure>
+        <figure>
+          <figcaption>Layout in (dithered)</figcaption>
+          <img id="printPreview" alt="Layout máy in nhiệt" />
+        </figure>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

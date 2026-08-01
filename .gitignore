@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.env
+.DS_Store
+data/temp/*
+data/prints/*
+data/uploads/*
+!data/temp/.gitkeep
+!data/prints/.gitkeep
+!data/uploads/.gitkeep
+*.raw
+*.ARW
