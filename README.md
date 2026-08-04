@@ -71,16 +71,22 @@ Sao chép file môi trường mẫu:
 cp .env.example .env
 ```
 
-Các biến quan trọng:
+### Cloudinary (bắt buộc cho QR online)
 
-| Biến | Mặc định | Ý nghĩa |
-|------|----------|---------|
-| `QR_BASE_URL` | `https://my-photobooth.app/photo/{id}` | Template QR — **bắt buộc** có `{id}` |
-| `PRINTER_BACKEND` | `usb` | `usb` \| `cups` \| `file` (dry-run) |
-| `PRINTER_VENDOR_ID` | `0x0416` | USB VID POS58 (Generic thường `0x0416`) |
-| `PRINTER_PRODUCT_ID` | `0x5011` | USB PID |
-| `PRINTER_CUPS_NAME` | `POS58` | Tên máy in CUPS nếu dùng backend `cups` |
-| `HOST` / `PORT` | `0.0.0.0` / `8000` | Web UI |
+1. Tạo tài khoản tại [cloudinary.com](https://cloudinary.com)
+2. Lấy **Cloud name / API Key / API Secret** từ Dashboard
+3. Điền vào `.env`:
+
+```env
+CLOUDINARY_CLOUD_NAME=your_cloud
+CLOUDINARY_API_KEY=xxxx
+CLOUDINARY_API_SECRET=yyyy
+CLOUDINARY_FOLDER=bk-fire-photobooth
+```
+
+Sau mỗi lần **CHỤP & IN**: JPEG lưu vào `data/photos/`, upload Cloudinary, QR trên phiếu in = `secure_url`.
+
+> Sony đang xuất RAW+JPEG (file `.ARW`) dù bạn nghĩ chỉ chụp JPEG — thường do Image Quality = **RAW & JPEG**. App sẽ **chỉ giữ JPEG**, xoá RAW sau khi tải. Nên đặt Quality = Fine/Standard trên thân máy.
 
 ### Logo
 

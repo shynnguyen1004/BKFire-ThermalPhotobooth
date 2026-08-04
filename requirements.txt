@@ -8,6 +8,6 @@ python-escpos>=3.1
 pyusb>=1.2.1
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
-# Optional binding (CLI `gphoto2` from Homebrew already works without this):
-#   brew install gphoto2 libgphoto2
-#   pip install python-gphoto2
+cloudinary>=1.41.0
+# Needs: brew install gphoto2 libgphoto2
+gphoto2>=2.5.0

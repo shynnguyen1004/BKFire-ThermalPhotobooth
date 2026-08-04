@@ -29,14 +29,21 @@ def main() -> None:
         raise SystemExit(f"File not found: {args.image}")
 
     settings.ensure_dirs()
+    from app.infrastructure.storage.cloudinary_storage import CloudinaryStorage
+
+    layout = LayoutRenderer(
+        width=settings.print_width_px,
+        logo_path=settings.logo_path,
+        org_name=settings.org_name,
+        output_dir=settings.prints_dir,
+        grid_cols=settings.grid_cols,
+        grid_rows=settings.grid_rows,
+        portrait_aspect_w=settings.portrait_aspect_w,
+        portrait_aspect_h=settings.portrait_aspect_h,
+    )
     service = PhotoboothService(
         camera=GPhotoCamera(temp_dir=settings.temp_dir),
-        layout=LayoutRenderer(
-            width=settings.print_width_px,
-            logo_path=settings.logo_path,
-            org_name=settings.org_name,
-            output_dir=settings.prints_dir,
-        ),
+        layout=layout,
         printer=POS58Printer(
             vendor_id=settings.printer_vendor_id,
             product_id=settings.printer_product_id,
@@ -44,7 +51,18 @@ def main() -> None:
             backend=settings.printer_backend,  # type: ignore[arg-type]
             dry_run_dir=settings.prints_dir,
         ),
-        storage=FileStorage(settings.uploads_dir),
+        storage=FileStorage(settings.photos_dir),
+        cloudinary=CloudinaryStorage(
+            cloud_name=settings.cloudinary_cloud_name,
+            api_key=settings.cloudinary_api_key,
+            api_secret=settings.cloudinary_api_secret,
+            folder=settings.cloudinary_folder,
+        )
+        if settings.cloudinary_enabled
+        else None,
+        qr_base_url=settings.qr_base_url,
+        burst_count=settings.burst_count,
+        burst_interval_sec=settings.burst_interval_sec,
     )
 
     result = service.demo_from_image(

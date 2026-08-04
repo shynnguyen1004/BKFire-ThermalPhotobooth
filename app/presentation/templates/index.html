@@ -29,21 +29,17 @@
         </select>
       </label>
 
-      <label class="field">
-        <span>URL base QR (phải có <code>{id}</code>)</span>
-        <input
-          id="qrBase"
-          type="url"
-          name="qr_base_url"
-          value="{{ qr_base_url }}"
-          placeholder="https://my-photobooth.app/photo/{id}"
-          required
-        />
-      </label>
+      <p class="cloud-note" id="cloudNote">
+        {% if cloudinary_enabled %}
+          QR sẽ dùng link Cloudinary (<code>{{ cloudinary_folder }}</code>) sau khi upload.
+        {% else %}
+          Cloudinary chưa cấu hình — thêm credentials vào <code>.env</code> để QR trỏ ảnh online.
+        {% endif %}
+      </p>
 
       <button id="captureBtn" class="cta" type="button">
         <span class="cta__label">CHỤP &amp; IN</span>
-        <span class="cta__hint">Sony A7S2 → Layout 58mm → POS58</span>
+        <span class="cta__hint">{{ burst_count }} tấm dọc · cách {{ burst_interval_sec|int }}s · grid 2×2</span>
       </button>
 
       <div id="statusBar" class="status" role="status" aria-live="polite">
@@ -54,10 +50,11 @@
     <aside class="preview" hidden id="preview">
       <h2>Kết quả</h2>
       <p id="resultMsg"></p>
+      <div class="preview__frames" id="frameGrid"></div>
       <div class="preview__frames">
         <figure>
-          <figcaption>Ảnh gốc</figcaption>
-          <img id="photoPreview" alt="Ảnh vừa chụp" />
+          <figcaption>Collage (Cloudinary)</figcaption>
+          <img id="photoPreview" alt="Collage 4 tấm" />
         </figure>
         <figure>
           <figcaption>Layout in (dithered)</figcaption>
@@ -67,6 +64,12 @@
     </aside>
   </main>
 
+  <script>
+    window.BOOTH_CONFIG = {
+      burstCount: {{ burst_count }},
+      burstIntervalSec: {{ burst_interval_sec }},
+    };
+  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>

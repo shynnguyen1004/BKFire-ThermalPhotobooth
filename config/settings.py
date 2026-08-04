@@ -36,10 +36,18 @@ class Settings(BaseSettings):
     # Paths
     temp_dir: Path = ROOT_DIR / "data" / "temp"
     prints_dir: Path = ROOT_DIR / "data" / "prints"
-    uploads_dir: Path = ROOT_DIR / "data" / "uploads"
+    photos_dir: Path = ROOT_DIR / "data" / "photos"
+    # legacy alias — same as photos_dir
+    uploads_dir: Path = ROOT_DIR / "data" / "photos"
 
-    # QR / download base URL template — `{id}` is replaced with photo id
+    # QR fallback when Cloudinary is disabled — `{id}` replaced with photo id
     qr_base_url: str = "https://my-photobooth.app/photo/{id}"
+
+    # Cloudinary (QR uses secure_url after upload)
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
+    cloudinary_folder: str = "bk-fire-photobooth"
 
     # Faculties / majors shown in the UI dropdown
     faculties: List[str] = Field(
@@ -70,6 +78,15 @@ class Settings(BaseSettings):
     camera_model_hint: str = "Sony"
     capture_timeout_sec: int = 30
 
+    # Burst session — 4 portrait shots, then 2×2 grid print
+    burst_count: int = 4
+    burst_interval_sec: float = 3.0
+    grid_cols: int = 2
+    grid_rows: int = 2
+    # Portrait cell aspect (width:height) e.g. 3:4
+    portrait_aspect_w: int = 3
+    portrait_aspect_h: int = 4
+
     # Web
     host: str = "0.0.0.0"
     port: int = 8000
@@ -80,8 +97,16 @@ class Settings(BaseSettings):
         return _parse_hex_int(value)
 
     def ensure_dirs(self) -> None:
-        for path in (self.temp_dir, self.prints_dir, self.uploads_dir):
+        for path in (self.temp_dir, self.prints_dir, self.photos_dir, self.uploads_dir):
             path.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def cloudinary_enabled(self) -> bool:
+        return bool(
+            self.cloudinary_cloud_name
+            and self.cloudinary_api_key
+            and self.cloudinary_api_secret
+        )
 
 
 settings = Settings()

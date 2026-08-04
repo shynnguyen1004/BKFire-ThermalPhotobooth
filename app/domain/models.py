@@ -18,7 +18,7 @@ class CaptureResult:
 @dataclass(frozen=True)
 class PrintJobRequest:
     faculty: str
-    qr_base_url: str
+    qr_base_url: str = ""
     photo_id: str | None = None
 
 
@@ -32,6 +32,8 @@ class SessionResult:
     printed: bool
     message: str
     captured_at: datetime = field(default_factory=datetime.now)
+    cloudinary_url: str | None = None
+    frame_paths: list[Path] = field(default_factory=list)
 
     @staticmethod
     def new_id() -> str:

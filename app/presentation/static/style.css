@@ -181,6 +181,24 @@ body {
   letter-spacing: 0.06em;
 }
 
+.cloud-note {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--smoke);
+}
+
+.cloud-note code {
+  font-size: 0.85em;
+  background: rgba(26, 18, 16, 0.06);
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+}
+
 .status {
   min-height: 3rem;
   padding: 0.85rem 1rem;
@@ -224,11 +242,19 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+#frameGrid {
+  grid-template-columns: repeat(4, 1fr);
 }
 
 @media (max-width: 560px) {
   .preview__frames {
     grid-template-columns: 1fr;
+  }
+  #frameGrid {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

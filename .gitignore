@@ -8,9 +8,15 @@ __pycache__/
 .DS_Store
 data/temp/*
 data/prints/*
+data/photos/*
 data/uploads/*
 !data/temp/.gitkeep
 !data/prints/.gitkeep
+!data/photos/.gitkeep
 !data/uploads/.gitkeep
+capt_*.JPG
+capt_*.jpg
+capt_*.ARW
+capt_*.arw
 *.raw
 *.ARW

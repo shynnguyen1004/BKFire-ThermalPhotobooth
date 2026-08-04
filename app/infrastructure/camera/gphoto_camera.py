@@ -27,86 +27,200 @@ class GPhotoCamera:
         self.model_hint = model_hint
         self.timeout_sec = timeout_sec
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_macos_hotplug_disabled()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def check_connection(self) -> dict:
-        """Return camera status. Auto-frees PTPCamera if it holds the device."""
+        """Return camera status. Auto-frees PTPCamera / Imaging Edge if needed."""
         self.release_macos_ptp_claim()
-        if _has_python_gphoto2():
-            return self._check_via_binding()
-        return self._check_via_cli()
+        detected = self._auto_detect()
+        if not detected:
+            return {
+                "connected": False,
+                "error": "Không thấy máy ảnh. Cắm USB, USB Connection = PC Remote.",
+            }
+
+        # auto-detect alone is not enough — try a real PTP open
+        claim_ok, claim_err = self._probe_ptp_session()
+        return {
+            "connected": claim_ok,
+            "detected": True,
+            "model": detected["model"],
+            "port": detected.get("port"),
+            "backend": detected.get("backend"),
+            "matches_hint": self.model_hint.lower() in detected["model"].lower()
+            or "sony" in detected["model"].lower(),
+            "claim_ok": claim_ok,
+            "error": None
+            if claim_ok
+            else (
+                claim_err
+                or "macOS đang giữ USB (kernel driver). "
+                "Tắt Imaging Edge, rút/cắm lại cáp, rồi thử lại."
+            ),
+        }
 
     def capture_photo(self, photo_id: Optional[str] = None) -> CaptureResult:
         """Trigger shutter, download JPEG to temp_dir, return CaptureResult."""
-        self.release_macos_ptp_claim()
         photo_id = photo_id or SessionResult.new_id()
         dest = self.temp_dir / f"{photo_id}.jpg"
+        last_error: Optional[Exception] = None
 
+        for attempt in range(1, 4):
+            self.release_macos_ptp_claim()
+            time.sleep(0.25 * attempt)
+            try:
+                if _has_python_gphoto2():
+                    try:
+                        return self._capture_via_binding(photo_id, dest)
+                    except CameraError as exc:
+                        logger.warning("binding attempt %s failed: %s", attempt, exc)
+                        last_error = exc
+                return self._capture_via_cli(photo_id, dest)
+            except CameraError as exc:
+                last_error = exc
+                logger.warning("capture attempt %s failed: %s", attempt, exc)
+                if not _is_retryable(str(exc)):
+                    break
+
+        raise CameraError(
+            f"{last_error}. Gợi ý: tắt Imaging Edge Desktop + Remote, "
+            "rút USB → tắt/bật máy ảnh → cắm thẳng vào Mac (không qua hub), "
+            "Allow accessory nếu macOS hỏi, rồi bấm CHỤP lại."
+        )
+
+    # ------------------------------------------------------------------
+    # Detection / probe
+    # ------------------------------------------------------------------
+
+    def _auto_detect(self) -> Optional[dict]:
         if _has_python_gphoto2():
             try:
-                return self._capture_via_binding(photo_id, dest)
-            except CameraError:
-                logger.warning("python-gphoto2 capture failed — retrying via CLI")
-                self.release_macos_ptp_claim()
-                time.sleep(0.5)
+                import gphoto2 as gp
 
-        return self._capture_via_cli(photo_id, dest)
+                cameras = gp.Camera.autodetect()
+                if cameras:
+                    model, port = cameras[0]
+                    return {"model": model, "port": port, "backend": "python-gphoto2"}
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("autodetect binding failed: %s", exc)
+
+        gphoto2_bin = _which("gphoto2")
+        if not gphoto2_bin:
+            return None
+        result = subprocess.run(
+            [gphoto2_bin, "--auto-detect"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        for ln in output.splitlines():
+            if "usb:" in ln.lower():
+                model = ln.split("usb:")[0].strip()
+                port = "usb:" + ln.split("usb:", 1)[1].strip().split()[0]
+                return {"model": model, "port": port, "backend": "gphoto2-cli"}
+        return None
+
+    def _probe_ptp_session(self) -> tuple[bool, Optional[str]]:
+        """Return (ok, error_message)."""
+        if _has_python_gphoto2():
+            import gphoto2 as gp
+
+            context = gp.Context()
+            camera = gp.Camera()
+            try:
+                camera.init(context)
+                camera.exit(context)
+                return True, None
+            except gp.GPhoto2Error as exc:
+                return False, f"PTP init lỗi ({exc.code}): {exc}"
+
+        gphoto2_bin = _which("gphoto2")
+        if not gphoto2_bin:
+            return False, "Chưa có gphoto2 CLI"
+        result = subprocess.run(
+            [gphoto2_bin, "--summary"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        err = (result.stderr or result.stdout or "").strip()
+        if result.returncode == 0 and "Manufacturer" in (result.stdout or ""):
+            return True, None
+        return False, err.splitlines()[-1] if err else "PTP summary failed"
 
     # ------------------------------------------------------------------
     # python-gphoto2 path
     # ------------------------------------------------------------------
 
-    def _check_via_binding(self) -> dict:
-        import gphoto2 as gp
-
-        context = gp.Context()
-        try:
-            camera = gp.Camera()
-            camera.init(context)
-            summary = camera.get_summary(context).text
-            abilities = camera.get_abilities()
-            model = abilities.model
-            camera.exit(context)
-            connected = self.model_hint.lower() in model.lower() or "sony" in model.lower()
-            return {
-                "connected": True,
-                "backend": "python-gphoto2",
-                "model": model,
-                "matches_hint": connected,
-                "summary": summary.splitlines()[:8],
-            }
-        except gp.GPhoto2Error as exc:
-            raise CameraError(
-                f"Không kết nối được máy ảnh (gphoto2 error {exc.code}): {exc}. "
-                "Rút/cắm lại USB, tắt Imaging Devices trên macOS, rồi thử lại."
-            ) from exc
-
     def _capture_via_binding(self, photo_id: str, dest: Path) -> CaptureResult:
         import gphoto2 as gp
 
+        from app.infrastructure.storage.file_storage import discard_raw_files, pick_jpeg
+
         context = gp.Context()
         camera = gp.Camera()
+        work = self.temp_dir / f"_capture_{photo_id}"
+        work.mkdir(parents=True, exist_ok=True)
+        for old in work.glob("*"):
+            old.unlink(missing_ok=True)
+
         try:
             camera.init(context)
             logger.info("Camera initialized (binding) — capturing %s", photo_id)
             self._prefer_jpeg(camera, context, gp)
 
             file_path = camera.capture(gp.GP_CAPTURE_IMAGE, context)
-            camera_file = camera.file_get(
-                file_path.folder,
-                file_path.name,
-                gp.GP_FILE_TYPE_NORMAL,
-                context,
-            )
-            camera_file.save(str(dest))
+            # Sony RAW+JPEG may emit multiple files — pull the capture event path,
+            # then also scan for a JPEG sibling if capture pointed at RAW.
+            paths = [(file_path.folder, file_path.name)]
+            # Drain a couple of file-added events (Sony often queues JPEG after RAW)
+            for _ in range(8):
+                try:
+                    ev_type, ev_data = camera.wait_for_event(200, context)
+                except gp.GPhoto2Error:
+                    break
+                if ev_type == gp.GP_EVENT_TIMEOUT:
+                    break
+                if ev_type == gp.GP_EVENT_FILE_ADDED and ev_data is not None:
+                    paths.append((ev_data.folder, ev_data.name))
 
+            seen: set[tuple[str, str]] = set()
+            for folder, name in paths:
+                key = (folder, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                camera_file = gp.CameraFile()
+                camera.file_get(folder, name, gp.GP_FILE_TYPE_NORMAL, camera_file, context)
+                target = work / name
+                camera_file.save(str(target))
+                try:
+                    camera.file_delete(folder, name, context)
+                except gp.GPhoto2Error:
+                    pass
+
+            discard_raw_files(work)
+            jpeg = pick_jpeg(work)
+            if jpeg is None:
+                raise CameraError(
+                    "Không có JPEG sau khi chụp (chỉ thấy RAW?). "
+                    "Trên A7S2 đặt Image Quality = Fine/Standard (tắt RAW+JPEG)."
+                )
+            shutil.move(str(jpeg), str(dest))
+            discard_raw_files(work)
+            for leftover in work.glob("*"):
+                leftover.unlink(missing_ok=True)
             try:
-                camera.file_delete(file_path.folder, file_path.name, context)
-            except gp.GPhoto2Error:
-                logger.debug("Could not delete capture from camera card")
+                work.rmdir()
+            except OSError:
+                pass
 
             if not dest.exists() or dest.stat().st_size == 0:
                 raise CameraError("File JPEG tải về trống hoặc không tồn tại.")
@@ -117,9 +231,6 @@ class GPhotoCamera:
                 captured_at=datetime.now(),
             )
         except gp.GPhoto2Error as exc:
-            if exc.code in (gp.GP_ERROR_IO, gp.GP_ERROR_MODEL_NOT_FOUND, -53, -60):
-                self.release_macos_ptp_claim()
-                time.sleep(0.8)
             raise CameraError(f"Capture thất bại (gphoto2 {exc.code}): {exc}") from exc
         finally:
             try:
@@ -128,48 +239,19 @@ class GPhotoCamera:
                 pass
 
     # ------------------------------------------------------------------
-    # gphoto2 CLI fallback (brew install gphoto2)
+    # gphoto2 CLI fallback
     # ------------------------------------------------------------------
-
-    def _check_via_cli(self) -> dict:
-        gphoto2_bin = _require_gphoto2_cli()
-        result = subprocess.run(
-            [gphoto2_bin, "--auto-detect"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-        # Skip header lines like "Model", "---------"
-        devices = [
-            ln
-            for ln in lines
-            if not ln.lower().startswith("model") and not set(ln) <= {"-", " "}
-        ]
-        if not devices:
-            raise CameraError(
-                "gphoto2 --auto-detect không thấy máy ảnh. "
-                "Cắm USB A7S2, chế độ PC Remote, rồi killall PTPCamera."
-            )
-        model = devices[0].split("usb:")[0].strip() if "usb:" in devices[0] else devices[0]
-        return {
-            "connected": True,
-            "backend": "gphoto2-cli",
-            "model": model,
-            "matches_hint": self.model_hint.lower() in model.lower() or "sony" in model.lower(),
-            "summary": devices[:5],
-        }
 
     def _capture_via_cli(self, photo_id: str, dest: Path) -> CaptureResult:
         gphoto2_bin = _require_gphoto2_cli()
         work = self.temp_dir / f"_capture_{photo_id}"
         work.mkdir(parents=True, exist_ok=True)
 
-        # Clear previous leftovers in work dir
         for old in work.glob("*"):
             old.unlink(missing_ok=True)
+
+        detected = self._auto_detect()
+        port = detected.get("port") if detected else None
 
         cmd = [
             gphoto2_bin,
@@ -178,6 +260,9 @@ class GPhotoCamera:
             str(work / "%f.%C"),
             "--force-overwrite",
         ]
+        if port:
+            cmd[1:1] = ["--port", port]
+
         logger.info("Capturing via CLI: %s", " ".join(cmd))
         result = subprocess.run(
             cmd,
@@ -189,24 +274,25 @@ class GPhotoCamera:
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
-            if "Could not claim" in err or "PTP" in err or "busy" in err.lower():
-                self.release_macos_ptp_claim()
-            raise CameraError(f"gphoto2 CLI capture thất bại: {err}")
+            # Keep message short for UI
+            compact = _compact_gphoto_error(err)
+            raise CameraError(f"gphoto2 capture thất bại: {compact}")
 
-        # Prefer JPEG over RAW
-        downloaded = sorted(work.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        jpeg = next((p for p in downloaded if p.suffix.lower() in {".jpg", ".jpeg"}), None)
-        if jpeg is None and downloaded:
-            # Convert RAW is out of scope — require JPEG on camera
-            raise CameraError(
-                f"Máy trả về {downloaded[0].suffix} thay vì JPEG. "
-                "Đặt Image Quality = JPEG / Fine trên A7S2."
-            )
+        from app.infrastructure.storage.file_storage import discard_raw_files, pick_jpeg
+
+        discarded = discard_raw_files(work)
+        if discarded:
+            logger.info("Discarded %s RAW sidecar(s) from capture %s", discarded, photo_id)
+
+        jpeg = pick_jpeg(work)
         if jpeg is None:
-            raise CameraError("gphoto2 không tải được file ảnh về.")
+            raise CameraError(
+                "Không có JPEG sau khi chụp. "
+                "Trên A7S2 đặt Image Quality = Fine/Standard (tắt RAW+JPEG)."
+            )
 
         shutil.move(str(jpeg), str(dest))
-        # Cleanup extras (e.g. .ARW alongside)
+        discard_raw_files(work)
         for leftover in work.glob("*"):
             leftover.unlink(missing_ok=True)
         try:
@@ -225,12 +311,39 @@ class GPhotoCamera:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def ensure_macos_hotplug_disabled() -> None:
+        """Stop macOS Image Capture from auto-claiming PTP cameras on plug-in."""
+        subprocess.run(
+            [
+                "defaults",
+                "-currentHost",
+                "write",
+                "com.apple.ImageCapture",
+                "disableHotPlug",
+                "-bool",
+                "YES",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @staticmethod
     def release_macos_ptp_claim() -> None:
         """
-        macOS auto-launches `PTPCamera` (Image Capture) which exclusives the USB
-        PTP endpoint. Kill it so libgphoto2 can claim the Sony body.
+        Free USB PTP from macOS Image Capture + Sony Imaging Edge so libgphoto2
+        can claim the Sony body.
         """
-        for pattern in ("PTPCamera", "ptpcamera"):
+        GPhotoCamera.ensure_macos_hotplug_disabled()
+
+        for pattern in (
+            "PTPCamera",
+            "ptpcamera",
+            "Imaging Edge Desktop",
+            "Remote",
+            "Viewer",
+            "Image Capture",
+        ):
             subprocess.run(
                 ["killall", "-9", pattern],
                 check=False,
@@ -244,19 +357,28 @@ class GPhotoCamera:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        subprocess.run(
+            ["pkill", "-9", "-f", "Imaging Edge"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["pkill", "-9", "-f", "com.sony.ImagingEdge"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Image Capture daemon — restarts automatically but briefly releases USB
+        subprocess.run(
+            ["killall", "-9", "icdd"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
-        gphoto2_bin = _which("gphoto2")
-        if gphoto2_bin:
-            subprocess.run(
-                [gphoto2_bin, "--auto-detect"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-
-        time.sleep(0.4)
-        logger.debug("Released macOS PTPCamera claim (if any)")
+        time.sleep(0.35)
+        logger.debug("Released macOS/Sony PTP claim (if any)")
 
     # ------------------------------------------------------------------
     # Internals
@@ -264,30 +386,49 @@ class GPhotoCamera:
 
     @staticmethod
     def _prefer_jpeg(camera, context, gp) -> None:
-        """Try to switch capture target / image quality to JPEG when supported."""
+        """Force JPEG-only quality when the camera exposes imagequality."""
         try:
             config = camera.get_config(context)
-            for name in ("imagequality", "capturetarget"):
+            try:
+                child = gp.check_result(gp.gp_widget_get_child_by_name(config, "imagequality"))
+            except gp.GPhoto2Error:
+                child = None
+            if child is not None:
+                # Prefer pure JPEG labels; avoid anything containing RAW
+                choices: list[str] = []
                 try:
-                    child = gp.check_result(gp.gp_widget_get_child_by_name(config, name))
-                except gp.GPhoto2Error:
-                    continue
-                if name == "imagequality":
-                    for choice in ("Standard", "Fine", "JPEG", "Extra Fine"):
-                        try:
-                            child.set_value(choice)
-                            camera.set_config(config, context)
-                            break
-                        except gp.GPhoto2Error:
-                            continue
-                elif name == "capturetarget":
-                    for choice in ("Memory card", "Card", "SDRAM", "Internal RAM"):
-                        try:
-                            child.set_value(choice)
-                            camera.set_config(config, context)
-                            break
-                        except gp.GPhoto2Error:
-                            continue
+                    count = child.count_choices()
+                    choices = [child.get_choice(i) for i in range(count)]
+                except Exception:  # noqa: BLE001
+                    choices = []
+                preferred = [
+                    c
+                    for c in choices
+                    if "raw" not in c.lower()
+                    and any(k in c.lower() for k in ("fine", "extra", "standard", "normal", "jpeg", "jpg"))
+                ]
+                fallback = [c for c in choices if "raw" not in c.lower()]
+                for choice in preferred + fallback + ["Fine", "Extra Fine", "Standard", "JPEG"]:
+                    try:
+                        child.set_value(choice)
+                        camera.set_config(config, context)
+                        logger.info("Set imagequality → %s", choice)
+                        break
+                    except gp.GPhoto2Error:
+                        continue
+
+            try:
+                target = gp.check_result(gp.gp_widget_get_child_by_name(config, "capturetarget"))
+            except gp.GPhoto2Error:
+                target = None
+            if target is not None:
+                for choice in ("Memory card", "Card", "SDRAM", "Internal RAM"):
+                    try:
+                        target.set_value(choice)
+                        camera.set_config(config, context)
+                        break
+                    except gp.GPhoto2Error:
+                        continue
         except gp.GPhoto2Error as exc:
             logger.debug("Could not tune camera config: %s", exc)
 
@@ -312,6 +453,34 @@ def _require_gphoto2_cli() -> str:
     if not path:
         raise CameraError(
             "Chưa có gphoto2. Cài: brew install gphoto2 libgphoto2 "
-            "rồi (tuỳ chọn) pip install python-gphoto2"
+            "rồi (tuỳ chọn) pip install gphoto2"
         )
     return path
+
+
+def _is_retryable(message: str) -> bool:
+    keys = (
+        "claim",
+        "busy",
+        "ptp",
+        "kernel driver",
+        "unspecified",
+        "i/o problem",
+        "detach",
+        "-53",
+        "-1",
+    )
+    lower = message.lower()
+    return any(k in lower for k in keys)
+
+
+def _compact_gphoto_error(err: str) -> str:
+    for line in err.splitlines():
+        low = line.lower()
+        if "could not claim" in low or "kernel driver" in low or "ptp" in low:
+            return line.strip()
+        if line.startswith("*** Error") or "ERROR:" in line:
+            continue
+    # fallback: last non-empty line
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    return lines[-1] if lines else err[:200]

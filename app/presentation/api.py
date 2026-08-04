@@ -10,13 +10,13 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
 
 from app.application.layout_service import LayoutRenderer
 from app.application.photobooth_service import PhotoboothService
 from app.domain.models import PrintJobRequest
 from app.infrastructure.camera.gphoto_camera import CameraError, GPhotoCamera
 from app.infrastructure.printer.pos58_printer import POS58Printer
+from app.infrastructure.storage.cloudinary_storage import CloudinaryStorage
 from app.infrastructure.storage.file_storage import FileStorage
 from config.settings import Settings, settings
 
@@ -24,11 +24,6 @@ logger = logging.getLogger(__name__)
 
 PRESENTATION_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(PRESENTATION_DIR / "templates"))
-
-
-class CaptureBody(BaseModel):
-    faculty: str = Field(..., min_length=1)
-    qr_base_url: str = Field(..., min_length=8)
 
 
 def build_service(cfg: Settings | None = None) -> PhotoboothService:
@@ -44,6 +39,10 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         logo_path=cfg.logo_path,
         org_name=cfg.org_name,
         output_dir=cfg.prints_dir,
+        grid_cols=cfg.grid_cols,
+        grid_rows=cfg.grid_rows,
+        portrait_aspect_w=cfg.portrait_aspect_w,
+        portrait_aspect_h=cfg.portrait_aspect_h,
     )
     printer = POS58Printer(
         vendor_id=cfg.printer_vendor_id,
@@ -52,8 +51,23 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         backend=cfg.printer_backend,  # type: ignore[arg-type]
         dry_run_dir=cfg.prints_dir,
     )
-    storage = FileStorage(uploads_dir=cfg.uploads_dir)
-    return PhotoboothService(camera=camera, layout=layout, printer=printer, storage=storage)
+    storage = FileStorage(photos_dir=cfg.photos_dir)
+    cloudinary = CloudinaryStorage(
+        cloud_name=cfg.cloudinary_cloud_name,
+        api_key=cfg.cloudinary_api_key,
+        api_secret=cfg.cloudinary_api_secret,
+        folder=cfg.cloudinary_folder,
+    )
+    return PhotoboothService(
+        camera=camera,
+        layout=layout,
+        printer=printer,
+        storage=storage,
+        cloudinary=cloudinary,
+        qr_base_url=cfg.qr_base_url,
+        burst_count=cfg.burst_count,
+        burst_interval_sec=cfg.burst_interval_sec,
+    )
 
 
 def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService] = None) -> FastAPI:
@@ -75,8 +89,11 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
             {
                 "request": request,
                 "faculties": cfg.faculties,
-                "qr_base_url": cfg.qr_base_url,
                 "org_name": cfg.org_name,
+                "cloudinary_enabled": cfg.cloudinary_enabled,
+                "cloudinary_folder": cfg.cloudinary_folder,
+                "burst_count": cfg.burst_count,
+                "burst_interval_sec": cfg.burst_interval_sec,
             },
         )
 
@@ -87,19 +104,11 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
     @app.post("/api/capture-print")
     async def api_capture_print(
         faculty: str = Form(...),
-        qr_base_url: str = Form(...),
     ) -> JSONResponse:
         if not faculty.strip():
             raise HTTPException(status_code=400, detail="Chưa chọn Khoa / Ngành.")
-        if "{id}" not in qr_base_url:
-            raise HTTPException(
-                status_code=400,
-                detail="URL base phải chứa placeholder {id}, ví dụ https://my-photobooth.app/photo/{id}",
-            )
         try:
-            result = booth.capture_and_print(
-                PrintJobRequest(faculty=faculty.strip(), qr_base_url=qr_base_url.strip())
-            )
+            result = booth.capture_and_print(PrintJobRequest(faculty=faculty.strip()))
         except CameraError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -112,8 +121,14 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
                 "photo_id": result.photo_id,
                 "printed": result.printed,
                 "qr_url": result.qr_url,
+                "cloudinary_url": result.cloudinary_url,
                 "layout_url": f"/prints/{result.photo_id}_print.png",
                 "photo_url": f"/photos/{result.photo_id}.jpg",
+                "frame_urls": [
+                    f"/photos/{result.photo_id}_{i}.jpg"
+                    for i in range(1, len(result.frame_paths) + 1)
+                ],
+                "burst_count": len(result.frame_paths),
                 "message": result.message,
                 "captured_at": result.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -135,7 +150,6 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
 
     @app.get("/photo/{photo_id}")
     async def public_photo_page(photo_id: str, request: Request) -> HTMLResponse:
-        """Guest download landing — matches QR URL pattern /photo/{id}."""
         path = booth.storage.get_photo(photo_id)
         if path is None:
             raise HTTPException(status_code=404, detail="Photo not found")
