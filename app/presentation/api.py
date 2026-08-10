@@ -12,9 +12,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.application.layout_service import LayoutRenderer
-from app.application.photobooth_service import PhotoboothService
+from app.application.photobooth_service import CaptureMode, PhotoboothService
 from app.domain.models import PrintJobRequest
+from app.infrastructure.camera.auto_camera import AutoCamera
 from app.infrastructure.camera.gphoto_camera import CameraError, GPhotoCamera
+from app.infrastructure.camera.webcam_camera import WebcamCamera
 from app.infrastructure.printer.pos58_printer import POS58Printer
 from app.infrastructure.storage.cloudinary_storage import CloudinaryStorage
 from app.infrastructure.storage.file_storage import FileStorage
@@ -29,15 +31,31 @@ TEMPLATES = Jinja2Templates(directory=str(PRESENTATION_DIR / "templates"))
 def build_service(cfg: Settings | None = None) -> PhotoboothService:
     cfg = cfg or settings
     cfg.ensure_dirs()
-    camera = GPhotoCamera(
+
+    backend = (cfg.camera_backend or "auto").strip().lower()
+    if backend not in ("auto", "gphoto", "webcam"):
+        backend = "auto"
+
+    gphoto = GPhotoCamera(
         temp_dir=cfg.temp_dir,
         model_hint=cfg.camera_model_hint,
         timeout_sec=cfg.capture_timeout_sec,
     )
+    webcam = WebcamCamera(
+        temp_dir=cfg.temp_dir,
+        device_index=cfg.webcam_device_index,
+        aspect_w=cfg.webcam_portrait_aspect_w,
+        aspect_h=cfg.webcam_portrait_aspect_h,
+    )
+    camera = AutoCamera(
+        gphoto=gphoto,
+        webcam=webcam,
+        backend=backend,  # type: ignore[arg-type]
+    )
+
     layout = LayoutRenderer(
-        width=cfg.print_width_px,
-        logo_path=cfg.logo_path,
-        org_name=cfg.org_name,
+        template_path=cfg.print_template_path,
+        register_qr_url=cfg.register_qr_url,
         output_dir=cfg.prints_dir,
         grid_cols=cfg.grid_cols,
         grid_rows=cfg.grid_rows,
@@ -65,8 +83,22 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         storage=storage,
         cloudinary=cloudinary,
         qr_base_url=cfg.qr_base_url,
-        burst_count=cfg.burst_count,
-        burst_interval_sec=cfg.burst_interval_sec,
+        gphoto_mode=CaptureMode(
+            burst_count=cfg.burst_count,
+            burst_interval_sec=cfg.burst_interval_sec,
+            grid_cols=cfg.grid_cols,
+            grid_rows=cfg.grid_rows,
+            portrait_aspect_w=cfg.portrait_aspect_w,
+            portrait_aspect_h=cfg.portrait_aspect_h,
+        ),
+        webcam_mode=CaptureMode(
+            burst_count=cfg.webcam_burst_count,
+            burst_interval_sec=cfg.webcam_burst_interval_sec,
+            grid_cols=cfg.webcam_grid_cols,
+            grid_rows=cfg.webcam_grid_rows,
+            portrait_aspect_w=cfg.webcam_portrait_aspect_w,
+            portrait_aspect_h=cfg.webcam_portrait_aspect_h,
+        ),
     )
 
 
@@ -94,6 +126,8 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
                 "cloudinary_folder": cfg.cloudinary_folder,
                 "burst_count": cfg.burst_count,
                 "burst_interval_sec": cfg.burst_interval_sec,
+                "grid_cols": cfg.grid_cols,
+                "grid_rows": cfg.grid_rows,
             },
         )
 

@@ -1,43 +1,52 @@
 # BK FIRE Photobooth
 
-Ứng dụng Python tự động hoá quy trình photobooth cho sự kiện **Club Day** trên macOS:
+Ứng dụng photobooth cho sự kiện **Club Day** trên macOS.
 
-**Sony A7S2 (USB / gphoto2) → Layout nhiệt 58mm (Pillow + Floyd–Steinberg) → POS58 (ESC/POS) + QR tải ảnh**
+**Sony (USB / gphoto2) → Layout nhiệt 58mm → POS58 + QR tải ảnh**
+
+Khi không có Sony, app tự chuyển sang camera MacBook (1 tấm).
 
 ---
 
-## Yêu cầu phần cứng
+## Yêu cầu
 
 | Thiết bị | Ghi chú |
 |----------|---------|
-| Mac (Intel / Apple Silicon) | macOS 12+ khuyến nghị |
-| Sony A7S II (A7S2) | Cáp USB, bật USB Connection = **PC Remote** / MTP nếu được hỏi |
-| Máy in nhiệt Generic POS58 | Khổ 58mm, vùng in **384 px @ 203 DPI**, USB |
+| Mac (Intel / Apple Silicon) | macOS 12+ |
+| Sony (A7S II / tương thích gphoto2) | Cáp **data** USB, không dùng cáp chỉ sạc |
+| Máy in nhiệt POS58 | Khổ 58mm, 384 px @ 203 DPI |
+
+### Cài đặt nhanh trên thân máy Sony
+
+1. **USB Connection** = **PC Remote** (hoặc MTP nếu máy hỏi)
+2. **Image Quality** = Fine / Standard (JPEG) — tránh **RAW & JPEG** (app chỉ giữ JPEG, xoá `.ARW`)
+3. Tắt Wi‑Fi / Imaging Edge trên Mac nếu đang chiếm USB
+4. Cắm cáp USB → Mac
+
+Kiểm tra nhận máy:
+
+```bash
+gphoto2 --auto-detect
+```
 
 ---
 
-## 1. Cài đặt hệ thống (Homebrew)
+## 1. Cài đặt hệ thống
 
 ```bash
-# Công cụ Homebrew (nếu chưa có): https://brew.sh
-brew install gphoto2 libgphoto2 libusb
-
-# Kiểm tra máy ảnh được nhận
-gphoto2 --auto-detect
+brew install gphoto2 libgphoto2 libusb ffmpeg
 ```
 
-### Giải phóng máy ảnh khỏi PTPCamera (macOS)
+### Giải phóng USB khỏi macOS (PTPCamera)
 
-macOS thường chiếm USB PTP qua tiến trình `PTPCamera` (Image Capture). Ứng dụng sẽ tự `killall PTPCamera` trước mỗi lần chụp. Nếu vẫn lỗi:
+macOS thường chiếm camera qua `PTPCamera`. App tự kill trước mỗi lần chụp. Nếu vẫn lỗi:
 
 ```bash
 killall -9 PTPCamera
-# Tắt tạm: System Settings → Printers & Scanners / Image Capture đang mở với A7S2
+# Đóng Photos / Image Capture / Imaging Edge đang mở với Sony
 gphoto2 --auto-detect
 gphoto2 --capture-image-and-download
 ```
-
-Trên một số máy cần chạy photobooth bằng quyền đủ để truy cập USB (thử Terminal thường trước; nếu `python-escpos` báo access denied, dùng CUPS backend — xem bên dưới).
 
 ---
 
@@ -53,19 +62,17 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Ứng dụng ưu tiên `python-gphoto2` nếu có; nếu không sẽ gọi CLI `gphoto2` (đã cài ở bước Homebrew). Binding Python là tuỳ chọn:
+Tuỳ chọn — binding `python-gphoto2` (nhanh hơn CLI):
 
 ```bash
-# Sau khi brew install gphoto2 libgphoto2
 export LDFLAGS="-L/opt/homebrew/lib"
 export CPPFLAGS="-I/opt/homebrew/include"
 pip install python-gphoto2
 ```
+
 ---
 
 ## 3. Cấu hình
-
-Sao chép file môi trường mẫu:
 
 ```bash
 cp .env.example .env
@@ -74,8 +81,7 @@ cp .env.example .env
 ### Cloudinary (bắt buộc cho QR online)
 
 1. Tạo tài khoản tại [cloudinary.com](https://cloudinary.com)
-2. Lấy **Cloud name / API Key / API Secret** từ Dashboard
-3. Điền vào `.env`:
+2. Điền vào `.env`:
 
 ```env
 CLOUDINARY_CLOUD_NAME=your_cloud
@@ -84,100 +90,92 @@ CLOUDINARY_API_SECRET=yyyy
 CLOUDINARY_FOLDER=bk-fire-photobooth
 ```
 
-Sau mỗi lần **CHỤP & IN**: JPEG lưu vào `data/photos/`, upload Cloudinary, QR trên phiếu in = `secure_url`.
+QR trên phiếu in dùng link ngắn `QR_BASE_URL` (redirect tới ảnh). Không dán thẳng URL Cloudinary dài vào QR 62px — sẽ không quét được.
 
-> Sony đang xuất RAW+JPEG (file `.ARW`) dù bạn nghĩ chỉ chụp JPEG — thường do Image Quality = **RAW & JPEG**. App sẽ **chỉ giữ JPEG**, xoá RAW sau khi tải. Nên đặt Quality = Fine/Standard trên thân máy.
-
-### Logo
-
-Đặt file logo tổ chức vào:
-
-```
-assets/logo.png
+```env
+QR_BASE_URL=https://my-photobooth.app/photo/{id}
+REGISTER_QR_URL=https://example.com/register
+CAMERA_BACKEND=auto
+PRINTER_BACKEND=cups
+PRINTER_CUPS_NAME=POS58
 ```
 
-Nếu chưa có, chạy script tạo logo placeholder:
+| Biến | Ý nghĩa |
+|------|---------|
+| `CAMERA_BACKEND` | `auto` (Sony → webcam), `gphoto`, hoặc `webcam` |
+| `PRINTER_BACKEND` | `cups` (khuyến nghị trên macOS), `usb`, hoặc `file` (chỉ lưu ảnh, không in) |
 
-```bash
-python scripts/make_placeholder_logo.py
+### Template in
+
+```
+assets/print_template.png   # 384×842 px — logo + chữ cố định
 ```
 
-### Tìm USB ID máy in
-
-```bash
-system_profiler SPUSBDataType | grep -A 20 -i "print\|POS\|USB"
-# hoặc
-python -c "import usb.core,usb.util; 
-import usb.core
-for d in usb.core.find(find_all=True):
-    print(hex(d.idVendor), hex(d.idProduct))"
-```
+App chỉ dán thêm: **ảnh** (ô 344×459, 3:4), **QR tải ảnh** (trái), **QR đăng ký** (phải). Đổi thiết kế: export PNG đúng 384×842 rồi thay file này.
 
 ---
 
-## 4. Chạy ứng dụng
+## 4. Chạy
 
 ```bash
 source .venv/bin/activate
 python main.py
 ```
 
-Mở trình duyệt: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+Mở [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
 1. Chọn **Khoa / Ngành**
-2. Kiểm / sửa **URL base QR**
-3. Bấm **CHỤP & IN**
+2. Bấm **CHỤP & IN**
 
-Luồng: capture JPEG → archive → render strip 384px → Floyd–Steinberg dither → ESC/POS print → guest mở `/photo/{id}` để tải ảnh.
+| Camera | Kết quả in |
+|--------|------------|
+| Sony USB | 4 tấm dọc 3:4 → grid 2×2 |
+| MacBook (fallback) | 1 tấm 3:4 dọc → 1×1 |
+
+Luồng: chụp JPEG → lưu `data/photos/` → upload Cloudinary → dán template + 2 QR (ảnh dither Floyd–Steinberg) → in → khách quét QR mở `/photo/{id}` để tải.
 
 ---
 
-## 5. Test layout không cần máy ảnh
+## 5. Test layout (không cần máy ảnh)
 
 ```bash
 python scripts/demo_layout.py path/to/sample.jpg --faculty "Khoa Cơ khí"
 ```
 
-Với `PRINTER_BACKEND=file`, chỉ lưu file dither vào `data/prints/` (không gửi máy in).
+Với `PRINTER_BACKEND=file`, chỉ lưu file vào `data/prints/`.
 
 ---
 
-## Cấu trúc (Clean Architecture)
+## Cấu trúc
 
 ```
-├── main.py                      # Entry / uvicorn
-├── config/settings.py           # Pydantic settings
+├── main.py
+├── config/settings.py
 ├── app/
-│   ├── domain/models.py         # CaptureResult, SessionResult, …
-│   ├── application/
-│   │   ├── layout_service.py    # Pillow layout + FLOYDSTEINBERG
-│   │   └── photobooth_service.py
+│   ├── domain/
+│   ├── application/          # layout + photobooth service
 │   ├── infrastructure/
-│   │   ├── camera/gphoto_camera.py   # gphoto2 + PTPCamera unbind
-│   │   ├── printer/pos58_printer.py  # python-escpos / CUPS
-│   │   └── storage/file_storage.py
-│   └── presentation/
-│       ├── api.py               # FastAPI routes
-│       ├── templates/           # HTML
-│       └── static/              # CSS / JS
-├── assets/logo.png
-├── data/{temp,prints,uploads}/
+│   │   ├── camera/           # gphoto (Sony), webcam, auto
+│   │   ├── printer/          # POS58 ESC/POS / CUPS
+│   │   └── storage/          # file + Cloudinary
+│   └── presentation/         # FastAPI + UI
+├── assets/print_template.png
+├── data/{temp,prints,photos}/
 ├── scripts/
-├── requirements.txt
-└── README.md
+└── requirements.txt
 ```
 
 ---
 
-## API nhanh
+## API
 
 | Method | Path | Mô tả |
 |--------|------|--------|
 | `GET` | `/` | Web UI booth |
 | `GET` | `/api/status` | Trạng thái camera + printer |
-| `POST` | `/api/capture-print` | Form: `faculty`, `qr_base_url` |
-| `GET` | `/photo/{id}` | Trang tải ảnh cho khách (QR) |
-| `GET` | `/photos/{id}.jpg` | File JPEG gốc |
+| `POST` | `/api/capture-print` | Form: `faculty` |
+| `GET` | `/photo/{id}` | Trang tải ảnh (QR) |
+| `GET` | `/photos/{id}.jpg` | JPEG gốc |
 | `GET` | `/prints/{id}_print.png` | Layout đã dither |
 
 ---
@@ -185,16 +183,19 @@ Với `PRINTER_BACKEND=file`, chỉ lưu file dither vào `data/prints/` (không
 ## Xử lý lỗi thường gặp
 
 **`Could not claim the USB device` / camera busy**  
-→ App đã gọi `release_macos_ptp_claim()`. Chạy thêm `killall -9 PTPCamera` và đóng Photos / Image Capture.
-
-**Máy in USB `Access denied`**  
-→ Đặt `PRINTER_BACKEND=cups`, thêm máy in POS58 trong **System Settings → Printers**, đặt tên khớp `PRINTER_CUPS_NAME`.
-
-**Ảnh in quá xám / bẩn**  
-→ Layout đã dither `Image.Dither.FLOYDSTEINBERG`. Kiểm tra máy in ở mật độ cao; tránh scale lại bằng phần mềm CUPS (dùng `usb` backend nếu được).
+→ `killall -9 PTPCamera`, đóng Photos / Image Capture / Imaging Edge.
 
 **Sony không hiện trong `gphoto2 --auto-detect`**  
-→ Đổi mode USB trên thân máy, dùng cáp data (không phải charge-only), tắt Wi-Fi transfer trên camera.
+→ USB Connection = PC Remote, cáp data (không phải charge-only), tắt Wi‑Fi transfer trên máy.
+
+**Máy in USB `Access denied`**  
+→ `PRINTER_BACKEND=cups`, thêm POS58 trong System Settings → Printers, tên khớp `PRINTER_CUPS_NAME`.
+
+**Ảnh in xám / bẩn**  
+→ Layout đã dither Floyd–Steinberg. Tăng mật độ in; tránh CUPS scale lại (ưu tiên backend `usb` nếu được).
+
+**Sony xuất thêm file `.ARW`**  
+→ Image Quality đang là RAW & JPEG. Đặt Fine/Standard; app vẫn chỉ giữ JPEG.
 
 ---
 

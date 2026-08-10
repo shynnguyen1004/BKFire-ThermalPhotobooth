@@ -10,4 +10,5 @@ pydantic>=2.9.0
 pydantic-settings>=2.6.0
 cloudinary>=1.41.0
 # Needs: brew install gphoto2 libgphoto2
+# Webcam fallback needs: brew install ffmpeg
 gphoto2>=2.5.0

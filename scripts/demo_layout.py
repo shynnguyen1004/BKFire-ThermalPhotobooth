@@ -32,9 +32,8 @@ def main() -> None:
     from app.infrastructure.storage.cloudinary_storage import CloudinaryStorage
 
     layout = LayoutRenderer(
-        width=settings.print_width_px,
-        logo_path=settings.logo_path,
-        org_name=settings.org_name,
+        template_path=settings.print_template_path,
+        register_qr_url=settings.register_qr_url,
         output_dir=settings.prints_dir,
         grid_cols=settings.grid_cols,
         grid_rows=settings.grid_rows,

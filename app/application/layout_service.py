@@ -1,137 +1,106 @@
-"""Thermal layout renderer — 384 px POS58 strip with Floyd–Steinberg dithering."""
+"""Template-based thermal layout renderer — POS58 384 px strip.
+
+The print design (``assets/print_template.png``, 384x955 @ 203 DPI) already
+carries every fixed element: logos, hard-fixed text and the photo/QR frames.
+Rendering a print therefore means pasting the dithered photo block and the
+two QR codes into that template, then converting to 1-bit for ESC/POS.
+"""
 
 from __future__ import annotations
 
 import logging
-import textwrap
-from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Optional, Sequence
 
 import qrcode
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
-# Layout constants tuned for 58 mm / 384 px @ 203 DPI
-WIDTH = 384
-MARGIN = 12
-GAP = 8
-HEADER_H = 72
-QR_SIZE = 120
-FOOTER_PAD = 8
-CELL_GAP = 6
+# Geometry measured from the design source (print_layout_full.svg, canvas 384x955)
+TEMPLATE_SIZE = (384, 955)
+PHOTO_BOX = (0, 90, 381, 510)           # x, y, w, h — full-bleed photo, frame line at col 381
+QR_DOWNLOAD_BOX = (20, 805, 122, 122)   # left white patch — variable per print
+QR_REGISTER_BOX = (243, 805, 122, 122)  # right white patch — fixed URL
+QR_QUIET_PX = 4                       # in-box quiet zone kept around each QR
+QR_MIN_MODULE_PX = 2                  # under ~0.25 mm/module phones stop scanning
+TEXT_THRESHOLD = 160                  # template AA edges darker than this go solid black
+CELL_GAP = 4                          # white gap between grid cells inside the photo box
+COLLAGE_SCALE = 3                     # color collage (upload/download) resolution multiplier
 
 
 class LayoutRenderer:
-    """Compose logo + photo grid + faculty + QR into a dithered 1-bit strip."""
+    """Paste the photo grid and QR codes into the fixed print template."""
 
     def __init__(
         self,
-        width: int = WIDTH,
-        logo_path: Optional[Path] = None,
-        org_name: str = "BK FIRE",
+        template_path: Path,
+        register_qr_url: str = "",
         output_dir: Optional[Path] = None,
         grid_cols: int = 2,
         grid_rows: int = 2,
         portrait_aspect_w: int = 3,
         portrait_aspect_h: int = 4,
     ) -> None:
-        self.width = width
-        self.logo_path = logo_path
-        self.org_name = org_name
+        self.register_qr_url = register_qr_url
         self.output_dir = output_dir
         self.grid_cols = grid_cols
         self.grid_rows = grid_rows
+        # Bookkeeping for capture modes / status API — on paper the aspect is
+        # dictated by PHOTO_BOX (3:4).
         self.portrait_aspect_w = portrait_aspect_w
         self.portrait_aspect_h = portrait_aspect_h
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._template = self._load_template(Path(template_path))
 
     def render(
         self,
         photo_paths: Path | Sequence[Path],
-        faculty: str,
         qr_url: str,
-        timestamp: Optional[datetime] = None,
         photo_id: Optional[str] = None,
         save: bool = True,
     ) -> Image.Image:
-        """
-        Build full strip (header + portrait grid + footer) and apply
-        Floyd–Steinberg dithering to mode ``1``.
-        """
+        """Compose template + photos + QR codes into the final 1-bit strip."""
         paths = self._normalize_paths(photo_paths)
-        ts = timestamp or datetime.now()
-        header = self._build_header(ts)
-        body = self._build_grid_body(paths)
-        footer = self._build_footer(faculty, qr_url)
+        canvas = self._template.copy()
 
-        total_h = header.height + GAP + body.height + GAP + footer.height
-        canvas = Image.new("L", (self.width, total_h), color=255)
-        y = 0
-        canvas.paste(header, (0, y))
-        y += header.height + GAP
-        canvas.paste(body, (0, y))
-        y += body.height + GAP
-        canvas.paste(footer, (0, y))
+        photo_block = self._compose_photos(paths, (PHOTO_BOX[2], PHOTO_BOX[3]), as_gray=True)
+        photo_block = photo_block.convert("1", dither=Image.Dither.FLOYDSTEINBERG).convert("L")
+        canvas.paste(photo_block, (PHOTO_BOX[0], PHOTO_BOX[1]))
 
-        draw = ImageDraw.Draw(canvas)
-        draw.line(
-            [(MARGIN, header.height + GAP // 2), (self.width - MARGIN, header.height + GAP // 2)],
-            fill=0,
-            width=1,
-        )
-        body_end = header.height + GAP + body.height
-        draw.line(
-            [(MARGIN, body_end + GAP // 2), (self.width - MARGIN, body_end + GAP // 2)],
-            fill=0,
-            width=1,
-        )
+        self._paste_qr(canvas, qr_url, QR_DOWNLOAD_BOX, label="download")
+        if self.register_qr_url:
+            self._paste_qr(canvas, self.register_qr_url, QR_REGISTER_BOX, label="register")
 
-        dithered = canvas.convert("1", dither=Image.Dither.FLOYDSTEINBERG)
-
+        strip = canvas.convert("1")
         if save and self.output_dir and photo_id:
             out = self.output_dir / f"{photo_id}_print.png"
-            dithered.save(out)
-            logger.info("Saved dithered layout → %s", out)
-
-        return dithered
+            strip.save(out)
+            logger.info("Saved print layout → %s", out)
+        return strip
 
     def render_to_path(
         self,
         photo_paths: Path | Sequence[Path],
-        faculty: str,
         qr_url: str,
         photo_id: str,
-        timestamp: Optional[datetime] = None,
     ) -> Path:
         if not self.output_dir:
             raise ValueError("output_dir is required for render_to_path")
-        img = self.render(
-            photo_paths=photo_paths,
-            faculty=faculty,
-            qr_url=qr_url,
-            timestamp=timestamp,
-            photo_id=photo_id,
-            save=True,
-        )
-        out = self.output_dir / f"{photo_id}_print.png"
-        img.save(out)
-        return out
+        self.render(photo_paths=photo_paths, qr_url=qr_url, photo_id=photo_id, save=True)
+        return self.output_dir / f"{photo_id}_print.png"
 
     def render_collage_color(
         self,
         photo_paths: Sequence[Path],
         photo_id: str,
     ) -> Path:
-        """Save a color JPEG collage (for Cloudinary) matching the print grid."""
+        """Save a color JPEG collage (guests download this) matching the print crop."""
         if not self.output_dir:
             raise ValueError("output_dir is required")
-        grid = self._build_grid_body(list(photo_paths), as_gray=False)
-        out = self.output_dir.parent / "photos" / f"{photo_id}_grid.jpg"
-        # Prefer photos_dir sibling — fall back next to prints
+        size = (PHOTO_BOX[2] * COLLAGE_SCALE, PHOTO_BOX[3] * COLLAGE_SCALE)
+        grid = self._compose_photos(list(photo_paths), size, as_gray=False)
         photos_dir = self.output_dir.parent / "photos"
         photos_dir.mkdir(parents=True, exist_ok=True)
         out = photos_dir / f"{photo_id}_grid.jpg"
@@ -139,112 +108,26 @@ class LayoutRenderer:
         return out
 
     # ------------------------------------------------------------------
-    # Sections
-    # ------------------------------------------------------------------
-
-    def _build_header(self, ts: datetime) -> Image.Image:
-        h = HEADER_H
-        img = Image.new("L", (self.width, h), color=255)
-        draw = ImageDraw.Draw(img)
-
-        logo = self._load_logo(max_h=h - 16)
-        x = MARGIN
-        if logo is not None:
-            img.paste(logo, (x, (h - logo.height) // 2))
-        else:
-            font_brand = self._font(22, bold=True)
-            draw.text((x, 12), self.org_name, fill=0, font=font_brand)
-
-        font_ts = self._font(14)
-        ts_text = ts.strftime("%Y-%m-%d %H:%M:%S")
-        tw = draw.textlength(ts_text, font=font_ts)
-        draw.text((self.width - MARGIN - tw, (h - 18) // 2), ts_text, fill=0, font=font_ts)
-        return img
-
-    def _build_grid_body(
-        self,
-        photo_paths: Sequence[Path],
-        as_gray: bool = True,
-    ) -> Image.Image:
-        cols = self.grid_cols
-        rows = self.grid_rows
-        slots = cols * rows
-
-        inner_w = self.width - 2 * MARGIN
-        cell_w = (inner_w - CELL_GAP * (cols - 1)) // cols
-        cell_h = int(cell_w * self.portrait_aspect_h / self.portrait_aspect_w)
-
-        grid_h = rows * cell_h + CELL_GAP * (rows - 1)
-        mode = "L" if as_gray else "RGB"
-        fill = 255 if as_gray else (255, 255, 255)
-        frame = Image.new(mode, (self.width, grid_h + 2 * MARGIN), color=fill)
-
-        paths = list(photo_paths)[:slots]
-        while len(paths) < slots:
-            paths.append(paths[-1] if paths else None)  # type: ignore[arg-type]
-
-        for idx in range(slots):
-            row, col = divmod(idx, cols)
-            # Fill order: left→right, top→bottom (1 2 / 3 4)
-            x = MARGIN + col * (cell_w + CELL_GAP)
-            y = MARGIN + row * (cell_h + CELL_GAP)
-            path = paths[idx]
-            if path is None or not Path(path).exists():
-                continue
-            cell = self._portrait_cell(Path(path), cell_w, cell_h, as_gray=as_gray)
-            frame.paste(cell, (x, y))
-
-        return frame
-
-    def _portrait_cell(
-        self,
-        photo_path: Path,
-        cell_w: int,
-        cell_h: int,
-        as_gray: bool = True,
-    ) -> Image.Image:
-        photo = Image.open(photo_path).convert("RGB")
-        # Auto-orient if EXIF says so, then center-crop to portrait cell
-        photo = ImageOps.exif_transpose(photo)
-        fitted = ImageOps.fit(photo, (cell_w, cell_h), method=Image.Resampling.LANCZOS)
-        return ImageOps.grayscale(fitted) if as_gray else fitted
-
-    def _build_footer(self, faculty: str, qr_url: str) -> Image.Image:
-        qr = self._make_qr(qr_url, QR_SIZE)
-        font = self._font(15)
-        font_small = self._font(11)
-
-        lines = textwrap.wrap(faculty, width=22) or [faculty]
-        line_h = 20
-        text_block_h = max(len(lines) * line_h, 40)
-        h = max(QR_SIZE, text_block_h) + 2 * FOOTER_PAD + 28
-
-        img = Image.new("L", (self.width, h), color=255)
-        draw = ImageDraw.Draw(img)
-
-        y = FOOTER_PAD
-        draw.text((MARGIN, y), "Khoa / Ngành:", fill=0, font=font_small)
-        y += 16
-        for line in lines[:4]:
-            draw.text((MARGIN, y), line, fill=0, font=font)
-            y += line_h
-
-        qr_x = self.width - MARGIN - QR_SIZE
-        img.paste(qr, (qr_x, FOOTER_PAD))
-
-        hint = qr_url if len(qr_url) <= 36 else qr_url[:33] + "..."
-        hint_w = draw.textlength(hint, font=font_small)
-        draw.text(
-            (max(MARGIN, (self.width - hint_w) // 2), h - 18),
-            hint,
-            fill=0,
-            font=font_small,
-        )
-        return img
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_template(path: Path) -> Image.Image:
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Không tìm thấy template in: {path} — đặt print_template.png "
+                f"({TEMPLATE_SIZE[0]}x{TEMPLATE_SIZE[1]}) vào assets/."
+            )
+        rgba = Image.open(path).convert("RGBA")
+        if rgba.size != TEMPLATE_SIZE:
+            raise ValueError(
+                f"Template {path} phải đúng {TEMPLATE_SIZE[0]}x{TEMPLATE_SIZE[1]} px "
+                f"(hiện là {rgba.size[0]}x{rgba.size[1]})."
+            )
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        gray = Image.alpha_composite(white, rgba).convert("L")
+        # Threshold instead of dithering so fixed text/frames stay crisp on thermal
+        return gray.point(lambda v: 0 if v < TEXT_THRESHOLD else 255)
 
     @staticmethod
     def _normalize_paths(photo_paths: Path | Sequence[Path]) -> list[Path]:
@@ -252,49 +135,82 @@ class LayoutRenderer:
             return [photo_paths]
         return [Path(p) for p in photo_paths]
 
-    def _load_logo(self, max_h: int) -> Optional[Image.Image]:
-        if not self.logo_path or not Path(self.logo_path).exists():
-            logger.warning("logo.png not found at %s — using text brand", self.logo_path)
-            return None
-        logo = Image.open(self.logo_path).convert("RGBA")
-        bg = Image.new("RGBA", logo.size, (255, 255, 255, 255))
-        logo = Image.alpha_composite(bg, logo).convert("L")
-        ratio = max_h / logo.height
-        new_size = (max(1, int(logo.width * ratio)), max_h)
-        max_w = self.width // 2
-        if new_size[0] > max_w:
-            ratio = max_w / logo.width
-            new_size = (max_w, max(1, int(logo.height * ratio)))
-        return logo.resize(new_size, Image.Resampling.LANCZOS)
+    def _compose_photos(
+        self,
+        photo_paths: Sequence[Optional[Path]],
+        size: tuple[int, int],
+        as_gray: bool,
+    ) -> Image.Image:
+        """Fill ``size`` with a grid_cols x grid_rows grid (1x1 = single photo)."""
+        w, h = size
+        cols = max(1, self.grid_cols)
+        rows = max(1, self.grid_rows)
+        slots = cols * rows
+        gap = CELL_GAP * max(1, w // PHOTO_BOX[2])  # keep gap proportional in hi-res collage
 
-    def _make_qr(self, url: str, size: int) -> Image.Image:
+        paths = list(photo_paths)[:slots]
+        while len(paths) < slots:
+            paths.append(paths[-1] if paths else None)  # type: ignore[arg-type]
+
+        mode = "L" if as_gray else "RGB"
+        fill = 255 if as_gray else (255, 255, 255)
+        canvas = Image.new(mode, (w, h), color=fill)
+
+        cell_w = (w - gap * (cols - 1)) // cols
+        cell_h = (h - gap * (rows - 1)) // rows
+        x0 = (w - (cols * cell_w + gap * (cols - 1))) // 2
+        y0 = (h - (rows * cell_h + gap * (rows - 1))) // 2
+
+        for idx in range(slots):
+            row, col = divmod(idx, cols)  # fill order: left→right, top→bottom
+            path = paths[idx]
+            if path is None or not Path(path).exists():
+                continue
+            cell = self._cell(Path(path), cell_w, cell_h, as_gray=as_gray)
+            canvas.paste(cell, (x0 + col * (cell_w + gap), y0 + row * (cell_h + gap)))
+        return canvas
+
+    @staticmethod
+    def _cell(photo_path: Path, cell_w: int, cell_h: int, as_gray: bool) -> Image.Image:
+        photo = Image.open(photo_path)
+        photo = ImageOps.exif_transpose(photo).convert("RGB")
+        fitted = ImageOps.fit(photo, (cell_w, cell_h), method=Image.Resampling.LANCZOS)
+        if not as_gray:
+            return fitted
+        # Autocontrast gives the dithered result more punch on thermal paper
+        return ImageOps.autocontrast(fitted.convert("L"), cutoff=2)
+
+    def _paste_qr(
+        self,
+        canvas: Image.Image,
+        url: str,
+        box: tuple[int, int, int, int],
+        label: str,
+    ) -> None:
+        x, y, w, h = box
         qr = qrcode.QRCode(
-            version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=4,
-            border=1,
+            # EC level L keeps the module grid as small as possible — the
+            # template QR patch is only ~7.8 mm wide.
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=0,  # the white patch itself is the quiet zone
         )
         qr.add_data(url)
         qr.make(fit=True)
+        modules = qr.modules_count
+        scale = max(1, (min(w, h) - 2 * QR_QUIET_PX) // modules)
+        if scale < QR_MIN_MODULE_PX:
+            logger.warning(
+                "QR %s: URL %d ký tự → %dx%d modules, chỉ đạt %d px/module — "
+                "nguy cơ không quét được, hãy rút gọn URL!",
+                label,
+                len(url),
+                modules,
+                modules,
+                scale,
+            )
         img = qr.make_image(fill_color="black", back_color="white").convert("L")
-        return img.resize((size, size), Image.Resampling.NEAREST)
+        img = img.resize((modules * scale, modules * scale), Image.Resampling.NEAREST)
 
-    def _font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        candidates = [
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/Library/Fonts/Arial.ttf",
-            "/System/Library/Fonts/SFNSMono.ttf",
-        ]
-        for path in candidates:
-            try:
-                return ImageFont.truetype(path, size=size)
-            except OSError:
-                continue
-        return ImageFont.load_default()
-
-
-def dithered_to_png_bytes(img: Image.Image) -> bytes:
-    buf = BytesIO()
-    img.convert("1").save(buf, format="PNG")
-    return buf.getvalue()
+        canvas.paste(255, (x, y, x + w, y + h))  # wipe the placeholder QR
+        canvas.paste(img, (x + (w - img.width) // 2, y + (h - img.height) // 2))

@@ -39,7 +39,7 @@
 
       <button id="captureBtn" class="cta" type="button">
         <span class="cta__label">CHỤP &amp; IN</span>
-        <span class="cta__hint">{{ burst_count }} tấm dọc · cách {{ burst_interval_sec|int }}s · grid 2×2</span>
+        <span class="cta__hint" id="captureHint">{{ burst_count }} tấm dọc · grid {{ grid_cols }}×{{ grid_rows }}</span>
       </button>
 
       <div id="statusBar" class="status" role="status" aria-live="polite">

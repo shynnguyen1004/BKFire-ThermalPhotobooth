@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -12,6 +13,14 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 Backend = Literal["usb", "cups", "file"]
+
+# Máy clone POS58 chỉ có buffer vài KB và firmware không flow-control tử tế:
+# đẩy raster nhanh hơn tốc độ in là tràn buffer → rơi byte (in ra ký tự rác)
+# rồi stall endpoint (Errno 32). Giải pháp: gửi từng dải nhỏ và nghỉ theo
+# lượng mực (dải càng đậm đầu nhiệt in càng chậm).
+BAND_ROWS = 48          # 48 dòng x 48 byte ≈ 2.3 KB mỗi dải
+BAND_BASE_DELAY = 0.06  # giây — nghỉ tối thiểu giữa hai dải
+BAND_INK_DELAY = 0.24   # giây — cộng thêm tỉ lệ thuận với mật độ điểm đen
 
 
 class PrinterError(RuntimeError):
@@ -97,12 +106,38 @@ class POS58Printer:
 
     def _print_usb(self, img: Image.Image) -> None:
         try:
+            import usb.core
             from escpos.printer import Usb
         except ImportError as exc:
             raise PrinterError("python-escpos chưa được cài.") from exc
 
+        class _UsbNoReset(Usb):
+            """POS58 clone trên macOS: ``device.reset()`` trong ``Usb._configure_usb``
+            làm handle libusb chết ngay sau đó (write dính Errno 5/32).
+            Override để chỉ ``set_configuration``, bỏ ``reset``."""
+
+            def _configure_usb(self) -> None:
+                if not self.device:
+                    return
+                try:
+                    self.device.set_configuration()
+                except usb.core.USBError as exc:
+                    logger.warning("USB set_configuration: %s", exc)
+                # Job trước lỗi/ngắt giữa chừng có thể để endpoint kẹt HALT
+                # → mọi write sau dính Errno 32. CLEAR_FEATURE gỡ stall mà
+                # không re-enumerate thiết bị như reset().
+                for ep in (self.out_ep, self.in_ep):
+                    try:
+                        self.device.clear_halt(ep)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("USB clear_halt(0x%02x): %s", ep, exc)
+
         try:
-            printer = Usb(self.vendor_id, self.product_id, profile="POS-5890")
+            # timeout 30s/lần ghi — máy kẹt buffer sẽ báo lỗi thay vì treo vô hạn
+            printer = _UsbNoReset(
+                self.vendor_id, self.product_id, timeout=30_000, profile="POS-5890"
+            )
+            printer.open()
         except Exception as exc:  # noqa: BLE001
             raise PrinterError(
                 f"Không mở được POS58 USB ({hex(self.vendor_id)}:{hex(self.product_id)}): {exc}. "
@@ -110,9 +145,19 @@ class POS58Printer:
             ) from exc
 
         try:
-            # High-density raster bit image
             printer.set(align="center")
-            printer.image(img, impl="bitImageRaster", high_density_vertical=True, high_density_horizontal=True)
+            # Gửi raster theo dải nhỏ, tự điều tốc theo mật độ đen — xem chú
+            # thích BAND_* ở đầu file.
+            for top in range(0, img.height, BAND_ROWS):
+                band = img.crop((0, top, img.width, min(top + BAND_ROWS, img.height)))
+                printer.image(
+                    band,
+                    impl="bitImageRaster",
+                    high_density_vertical=True,
+                    high_density_horizontal=True,
+                )
+                black_ratio = band.histogram()[0] / (band.width * band.height)
+                time.sleep(BAND_BASE_DELAY + BAND_INK_DELAY * black_ratio)
             printer.text("\n")
             # Feed then partial cut (POS58 supports GS V)
             try:

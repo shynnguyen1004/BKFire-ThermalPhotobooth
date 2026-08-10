@@ -27,7 +27,9 @@ class Settings(BaseSettings):
 
     # Branding
     org_name: str = "BK FIRE"
-    logo_path: Path = ROOT_DIR / "assets" / "logo.png"
+
+    # Print template — mọi chữ/logo cố định nằm sẵn trong file (384x842 @ 203 DPI)
+    print_template_path: Path = ROOT_DIR / "assets" / "print_template.png"
 
     # Print layout (POS58: 384 px @ 203 DPI)
     print_width_px: int = 384
@@ -40,8 +42,12 @@ class Settings(BaseSettings):
     # legacy alias — same as photos_dir
     uploads_dir: Path = ROOT_DIR / "data" / "photos"
 
-    # QR fallback when Cloudinary is disabled — `{id}` replaced with photo id
+    # QR download (góc trái phiếu in) — luôn dùng link ngắn redirect tới ảnh,
+    # `{id}` thay bằng photo id. Giữ URL ≤ ~50 ký tự để QR 62 px còn quét được.
     qr_base_url: str = "https://my-photobooth.app/photo/{id}"
+
+    # QR "SCAN TO REGISTER" (góc phải) — placeholder cho tới khi có link thật
+    register_qr_url: str = "https://www.youtube.com"
 
     # Cloudinary (QR uses secure_url after upload)
     cloudinary_cloud_name: str = ""
@@ -74,11 +80,14 @@ class Settings(BaseSettings):
     # "usb" | "cups" | "file" (file = save raster only, for dry-run)
     printer_backend: str = "usb"
 
-    # Camera
+    # Camera: auto | gphoto | webcam
+    # auto = Sony USB nếu có, không thì MacBook FaceTime
+    camera_backend: str = "auto"
     camera_model_hint: str = "Sony"
     capture_timeout_sec: int = 30
+    webcam_device_index: int = 0
 
-    # Burst session — 4 portrait shots, then 2×2 grid print
+    # Burst session — Sony mode: 4 portrait shots → 2×2 grid
     burst_count: int = 4
     burst_interval_sec: float = 3.0
     grid_cols: int = 2
@@ -86,6 +95,14 @@ class Settings(BaseSettings):
     # Portrait cell aspect (width:height) e.g. 3:4
     portrait_aspect_w: int = 3
     portrait_aspect_h: int = 4
+
+    # Webcam / no-Sony fallback — 1 shot, 3:4 portrait (khớp ô ảnh template), 1×1 print
+    webcam_burst_count: int = 1
+    webcam_burst_interval_sec: float = 0.0
+    webcam_grid_cols: int = 1
+    webcam_grid_rows: int = 1
+    webcam_portrait_aspect_w: int = 3
+    webcam_portrait_aspect_h: int = 4
 
     # Web
     host: str = "0.0.0.0"
