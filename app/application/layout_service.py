@@ -25,27 +25,22 @@ QR_REGISTER_BOX = (243, 805, 122, 122)  # right white patch — fixed URL
 QR_QUIET_PX = 4                       # in-box quiet zone kept around each QR
 QR_MIN_MODULE_PX = 2                  # under ~0.25 mm/module phones stop scanning
 TEXT_THRESHOLD = 160                  # template AA edges darker than this go solid black
-CELL_GAP = 4                          # white gap between grid cells inside the photo box
-COLLAGE_SCALE = 3                     # color collage (upload/download) resolution multiplier
+DOWNLOAD_SCALE = 3                    # color photo (upload/download) resolution multiplier
 
 
 class LayoutRenderer:
-    """Paste the photo grid and QR codes into the fixed print template."""
+    """Paste one photo and the QR codes into the fixed print template."""
 
     def __init__(
         self,
         template_path: Path,
         register_qr_url: str = "",
         output_dir: Optional[Path] = None,
-        grid_cols: int = 2,
-        grid_rows: int = 2,
         portrait_aspect_w: int = 3,
         portrait_aspect_h: int = 4,
     ) -> None:
         self.register_qr_url = register_qr_url
         self.output_dir = output_dir
-        self.grid_cols = grid_cols
-        self.grid_rows = grid_rows
         # Bookkeeping for capture modes / status API — on paper the aspect is
         # dictated by PHOTO_BOX (3:4).
         self.portrait_aspect_w = portrait_aspect_w
@@ -65,7 +60,8 @@ class LayoutRenderer:
         paths = self._normalize_paths(photo_paths)
         canvas = self._template.copy()
 
-        photo_block = self._compose_photos(paths, (PHOTO_BOX[2], PHOTO_BOX[3]), as_gray=True)
+        photo = paths[0] if paths else None
+        photo_block = self._photo_block(photo, (PHOTO_BOX[2], PHOTO_BOX[3]), as_gray=True)
         photo_block = photo_block.convert("1", dither=Image.Dither.FLOYDSTEINBERG).convert("L")
         canvas.paste(photo_block, (PHOTO_BOX[0], PHOTO_BOX[1]))
 
@@ -91,20 +87,21 @@ class LayoutRenderer:
         self.render(photo_paths=photo_paths, qr_url=qr_url, photo_id=photo_id, save=True)
         return self.output_dir / f"{photo_id}_print.png"
 
-    def render_collage_color(
+    def render_photo_color(
         self,
-        photo_paths: Sequence[Path],
+        photo_paths: Path | Sequence[Path],
         photo_id: str,
     ) -> Path:
-        """Save a color JPEG collage (guests download this) matching the print crop."""
+        """Save a color JPEG (guests download this) matching the print crop."""
         if not self.output_dir:
             raise ValueError("output_dir is required")
-        size = (PHOTO_BOX[2] * COLLAGE_SCALE, PHOTO_BOX[3] * COLLAGE_SCALE)
-        grid = self._compose_photos(list(photo_paths), size, as_gray=False)
+        paths = self._normalize_paths(photo_paths)
+        size = (PHOTO_BOX[2] * DOWNLOAD_SCALE, PHOTO_BOX[3] * DOWNLOAD_SCALE)
+        photo = self._photo_block(paths[0] if paths else None, size, as_gray=False)
         photos_dir = self.output_dir.parent / "photos"
         photos_dir.mkdir(parents=True, exist_ok=True)
-        out = photos_dir / f"{photo_id}_grid.jpg"
-        grid.convert("RGB").save(out, quality=92)
+        out = photos_dir / f"{photo_id}_full.jpg"
+        photo.convert("RGB").save(out, quality=92)
         return out
 
     # ------------------------------------------------------------------
@@ -135,46 +132,20 @@ class LayoutRenderer:
             return [photo_paths]
         return [Path(p) for p in photo_paths]
 
-    def _compose_photos(
-        self,
-        photo_paths: Sequence[Optional[Path]],
+    @staticmethod
+    def _photo_block(
+        photo_path: Optional[Path],
         size: tuple[int, int],
         as_gray: bool,
     ) -> Image.Image:
-        """Fill ``size`` with a grid_cols x grid_rows grid (1x1 = single photo)."""
-        w, h = size
-        cols = max(1, self.grid_cols)
-        rows = max(1, self.grid_rows)
-        slots = cols * rows
-        gap = CELL_GAP * max(1, w // PHOTO_BOX[2])  # keep gap proportional in hi-res collage
-
-        paths = list(photo_paths)[:slots]
-        while len(paths) < slots:
-            paths.append(paths[-1] if paths else None)  # type: ignore[arg-type]
-
+        """One photo center-cropped to fill ``size`` (white block if missing)."""
         mode = "L" if as_gray else "RGB"
         fill = 255 if as_gray else (255, 255, 255)
-        canvas = Image.new(mode, (w, h), color=fill)
-
-        cell_w = (w - gap * (cols - 1)) // cols
-        cell_h = (h - gap * (rows - 1)) // rows
-        x0 = (w - (cols * cell_w + gap * (cols - 1))) // 2
-        y0 = (h - (rows * cell_h + gap * (rows - 1))) // 2
-
-        for idx in range(slots):
-            row, col = divmod(idx, cols)  # fill order: left→right, top→bottom
-            path = paths[idx]
-            if path is None or not Path(path).exists():
-                continue
-            cell = self._cell(Path(path), cell_w, cell_h, as_gray=as_gray)
-            canvas.paste(cell, (x0 + col * (cell_w + gap), y0 + row * (cell_h + gap)))
-        return canvas
-
-    @staticmethod
-    def _cell(photo_path: Path, cell_w: int, cell_h: int, as_gray: bool) -> Image.Image:
+        if photo_path is None or not Path(photo_path).exists():
+            return Image.new(mode, size, color=fill)
         photo = Image.open(photo_path)
         photo = ImageOps.exif_transpose(photo).convert("RGB")
-        fitted = ImageOps.fit(photo, (cell_w, cell_h), method=Image.Resampling.LANCZOS)
+        fitted = ImageOps.fit(photo, size, method=Image.Resampling.LANCZOS)
         if not as_gray:
             return fitted
         # Autocontrast gives the dithered result more punch on thermal paper

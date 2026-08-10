@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Branding
     org_name: str = "BK FIRE"
 
-    # Print template — mọi chữ/logo cố định nằm sẵn trong file (384x842 @ 203 DPI)
+    # Print template — mọi chữ/logo cố định nằm sẵn trong file (384x955 @ 203 DPI)
     print_template_path: Path = ROOT_DIR / "assets" / "print_template.png"
 
     # Print layout (POS58: 384 px @ 203 DPI)
@@ -87,20 +87,16 @@ class Settings(BaseSettings):
     capture_timeout_sec: int = 30
     webcam_device_index: int = 0
 
-    # Burst session — Sony mode: 4 portrait shots → 2×2 grid
-    burst_count: int = 4
-    burst_interval_sec: float = 3.0
-    grid_cols: int = 2
-    grid_rows: int = 2
-    # Portrait cell aspect (width:height) e.g. 3:4
+    # Session chụp — mọi chế độ in 1 tấm dọc 3:4 giữa template
+    burst_count: int = 1
+    burst_interval_sec: float = 0.0
+    # Portrait aspect (width:height) — khớp ô ảnh template
     portrait_aspect_w: int = 3
     portrait_aspect_h: int = 4
 
-    # Webcam / no-Sony fallback — 1 shot, 3:4 portrait (khớp ô ảnh template), 1×1 print
+    # Webcam / no-Sony fallback — cũng 1 tấm 3:4
     webcam_burst_count: int = 1
     webcam_burst_interval_sec: float = 0.0
-    webcam_grid_cols: int = 1
-    webcam_grid_rows: int = 1
     webcam_portrait_aspect_w: int = 3
     webcam_portrait_aspect_h: int = 4
 

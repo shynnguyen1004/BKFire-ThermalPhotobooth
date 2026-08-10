@@ -8,12 +8,11 @@
   const photoPreview = document.getElementById("photoPreview");
   const printPreview = document.getElementById("printPreview");
   const frameGrid = document.getElementById("frameGrid");
-  const cfg = window.BOOTH_CONFIG || { burstCount: 4, burstIntervalSec: 3 };
+  const cfg = window.BOOTH_CONFIG || { burstCount: 1, burstIntervalSec: 0 };
 
   let liveBurst = {
     count: cfg.burstCount,
     intervalSec: cfg.burstIntervalSec,
-    grid: "2x2",
     aspect: "3:4",
     source: "gphoto",
   };
@@ -26,16 +25,11 @@
 
   function updateCaptureHint() {
     if (!captureHint) return;
-    const n = liveBurst.count;
     const aspect = liveBurst.aspect || "3:4";
-    const grid = liveBurst.grid || "2x2";
     if (liveBurst.source === "webcam") {
-      captureHint.textContent = `MacBook cam · 1 tấm · ${aspect} dọc · in 1×1`;
-    } else if (n <= 1) {
-      captureHint.textContent = `1 tấm dọc · ${aspect} · grid ${grid}`;
+      captureHint.textContent = `MacBook cam · 1 tấm · ${aspect} dọc · in giữa phiếu`;
     } else {
-      const gap = Math.round(liveBurst.intervalSec || 0);
-      captureHint.textContent = `${n} tấm dọc · cách ${gap}s · grid ${grid}`;
+      captureHint.textContent = `1 tấm dọc · ${aspect} · in giữa phiếu`;
     }
   }
 
@@ -47,7 +41,6 @@
         liveBurst = {
           count: data.burst.count ?? liveBurst.count,
           intervalSec: data.burst.interval_sec ?? liveBurst.intervalSec,
-          grid: data.burst.grid || liveBurst.grid,
           aspect: data.burst.aspect || liveBurst.aspect,
           source: data.burst.source || liveBurst.source,
         };
@@ -73,11 +66,11 @@
       const cloud = data.cloudinary?.enabled
         ? `Cloudinary: OK (${data.cloudinary.folder || "root"})`
         : "Cloudinary: chưa cấu hình";
-      const burst = data.burst
-        ? `Mode: ${data.burst.count} tấm · ${data.burst.aspect} · ${data.burst.grid}`
+      const mode = data.burst
+        ? `Mode: 1 tấm · ${data.burst.aspect}`
         : "";
       if (!btn.disabled) {
-        setStatus([cam, prn, cloud, burst].filter(Boolean).join(" · "));
+        setStatus([cam, prn, cloud, mode].filter(Boolean).join(" · "));
       }
     } catch {
       /* ignore */
@@ -106,15 +99,10 @@
     }
 
     btn.disabled = true;
-    const n = liveBurst.count;
-    const waitHint =
-      n <= 1
-        ? 8
-        : Math.round(n * 8 + (n - 1) * (liveBurst.intervalSec || 0));
     const modeHint =
       liveBurst.source === "webcam"
-        ? "MacBook cam · 1 tấm 3:2 dọc → in…"
-        : `Đang chụp ${n} tấm dọc → grid ${liveBurst.grid} → Cloudinary → in… (~${waitHint}s)`;
+        ? "MacBook cam · 1 tấm → Cloudinary → in…"
+        : "Đang chụp 1 tấm → Cloudinary → in… (~8s)";
     setStatus(modeHint, "busy");
 
     const body = new FormData();
@@ -129,7 +117,7 @@
 
       setStatus(data.message, data.printed ? "ok" : "err");
       const qrLine = data.cloudinary_url || data.qr_url;
-      resultMsg.textContent = `#${data.photo_id} · ${data.burst_count || n} tấm · ${data.captured_at} · QR: ${qrLine}`;
+      resultMsg.textContent = `#${data.photo_id} · 1 tấm · ${data.captured_at} · QR: ${qrLine}`;
       renderFrames(data.frame_urls);
       const bust = `?t=${Date.now()}`;
       photoPreview.src = data.photo_url + bust;

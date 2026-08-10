@@ -57,8 +57,6 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         template_path=cfg.print_template_path,
         register_qr_url=cfg.register_qr_url,
         output_dir=cfg.prints_dir,
-        grid_cols=cfg.grid_cols,
-        grid_rows=cfg.grid_rows,
         portrait_aspect_w=cfg.portrait_aspect_w,
         portrait_aspect_h=cfg.portrait_aspect_h,
     )
@@ -84,18 +82,14 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         cloudinary=cloudinary,
         qr_base_url=cfg.qr_base_url,
         gphoto_mode=CaptureMode(
-            burst_count=cfg.burst_count,
-            burst_interval_sec=cfg.burst_interval_sec,
-            grid_cols=cfg.grid_cols,
-            grid_rows=cfg.grid_rows,
+            burst_count=1,
+            burst_interval_sec=0.0,
             portrait_aspect_w=cfg.portrait_aspect_w,
             portrait_aspect_h=cfg.portrait_aspect_h,
         ),
         webcam_mode=CaptureMode(
-            burst_count=cfg.webcam_burst_count,
-            burst_interval_sec=cfg.webcam_burst_interval_sec,
-            grid_cols=cfg.webcam_grid_cols,
-            grid_rows=cfg.webcam_grid_rows,
+            burst_count=1,
+            burst_interval_sec=0.0,
             portrait_aspect_w=cfg.webcam_portrait_aspect_w,
             portrait_aspect_h=cfg.webcam_portrait_aspect_h,
         ),
@@ -126,8 +120,6 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
                 "cloudinary_folder": cfg.cloudinary_folder,
                 "burst_count": cfg.burst_count,
                 "burst_interval_sec": cfg.burst_interval_sec,
-                "grid_cols": cfg.grid_cols,
-                "grid_rows": cfg.grid_rows,
             },
         )
 

@@ -35,8 +35,6 @@ def main() -> None:
         template_path=settings.print_template_path,
         register_qr_url=settings.register_qr_url,
         output_dir=settings.prints_dir,
-        grid_cols=settings.grid_cols,
-        grid_rows=settings.grid_rows,
         portrait_aspect_w=settings.portrait_aspect_w,
         portrait_aspect_h=settings.portrait_aspect_h,
     )
