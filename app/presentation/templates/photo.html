@@ -4,12 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ảnh của bạn — {{ org_name }}</title>
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Poppins:wght@500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body class="guest">
   <main class="guest-card">
-    <p class="brand__mark">{{ org_name }}</p>
+    <div class="guest-logos">
+      <img src="/static/img/logo-bachkhoa.png" alt="BK TP.HCM" width="48" height="48" />
+      <img src="/static/img/logo-bkfire.png" alt="BK FIRE" width="48" height="48" />
+    </div>
+    <span class="event-pill">📸 Photobooth · Club Day 2026</span>
     <h1>Ảnh Club Day của bạn</h1>
     <p class="muted">Mã: {{ photo_id }}</p>
     <img class="guest-photo" src="{{ photo_url }}" alt="Ảnh photobooth" />

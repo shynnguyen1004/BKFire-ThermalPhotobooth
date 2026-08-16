@@ -17,9 +17,10 @@ class CaptureResult:
 
 @dataclass(frozen=True)
 class PrintJobRequest:
-    faculty: str
+    faculty: str = ""
     qr_base_url: str = ""
     photo_id: str | None = None
+    dither_style: str = "floyd"  # "comic" | "floyd"
 
 
 @dataclass

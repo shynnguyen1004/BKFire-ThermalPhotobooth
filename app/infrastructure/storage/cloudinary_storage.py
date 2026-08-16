@@ -31,6 +31,19 @@ class CloudinaryStorage:
     def enabled(self) -> bool:
         return bool(self.cloud_name and self.api_key and self.api_secret)
 
+    def public_id_for(self, photo_id: str) -> str:
+        return f"{self.folder}/{photo_id}" if self.folder else photo_id
+
+    def expected_url(self, photo_id: str, ext: str = "png") -> str:
+        """URL ổn định (không version) — dùng trước khi upload để nhúng QR."""
+        if not self.cloud_name:
+            raise CloudinaryError("Thiếu CLOUDINARY_CLOUD_NAME")
+        public_id = self.public_id_for(photo_id)
+        return (
+            f"https://res.cloudinary.com/{self.cloud_name}/image/upload/"
+            f"{public_id}.{ext.lstrip('.')}"
+        )
+
     def configure(self) -> None:
         if not self.enabled:
             raise CloudinaryError(
@@ -52,22 +65,32 @@ class CloudinaryStorage:
         )
         self._configured = True
 
-    def upload_photo(self, local_path: Path, photo_id: str) -> str:
-        """Upload JPEG and return secure_url used for QR."""
+    def upload_photo(
+        self,
+        local_path: Path,
+        photo_id: str,
+        *,
+        image_format: Optional[str] = None,
+    ) -> str:
+        """Upload image and return secure_url used for QR."""
         self.configure()
         import cloudinary.uploader
 
         if not local_path.exists():
             raise CloudinaryError(f"File không tồn tại: {local_path}")
 
-        public_id = f"{self.folder}/{photo_id}" if self.folder else photo_id
+        fmt = (image_format or local_path.suffix.lstrip(".") or "jpg").lower()
+        if fmt == "jpeg":
+            fmt = "jpg"
+
+        public_id = self.public_id_for(photo_id)
         try:
             result = cloudinary.uploader.upload(
                 str(local_path),
                 public_id=public_id,
                 overwrite=True,
                 resource_type="image",
-                format="jpg",
+                format=fmt,
                 unique_filename=False,
                 use_filename=False,
             )

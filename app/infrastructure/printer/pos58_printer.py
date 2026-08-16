@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import time
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -14,13 +13,20 @@ logger = logging.getLogger(__name__)
 
 Backend = Literal["usb", "cups", "file"]
 
-# Máy clone POS58 chỉ có buffer vài KB và firmware không flow-control tử tế:
-# đẩy raster nhanh hơn tốc độ in là tràn buffer → rơi byte (in ra ký tự rác)
-# rồi stall endpoint (Errno 32). Giải pháp: gửi từng dải nhỏ và nghỉ theo
-# lượng mực (dải càng đậm đầu nhiệt in càng chậm).
-BAND_ROWS = 48          # 48 dòng x 48 byte ≈ 2.3 KB mỗi dải
-BAND_BASE_DELAY = 0.06  # giây — nghỉ tối thiểu giữa hai dải
-BAND_INK_DELAY = 0.24   # giây — cộng thêm tỉ lệ thuận với mật độ điểm đen
+# Máy clone POS58 buffer nhỏ — chia GS v 0 thành dải nhỏ.
+# Không sleep giữa các dải: nghỉ sẽ tạo “sọc/gap” ngang trên ảnh.
+BAND_ROWS = 48          # 48×48 byte ≈ 2.3 KB / lệnh
+# Gửi cả khối GS v 0 trong một USB write nếu vừa.
+USB_WRITE_CHUNK = 4096
+
+# ESC 7 — heat (n2 càng cao càng đen).
+HEAT_DOTS = 7
+HEAT_TIME = 80
+HEAT_INTERVAL = 2
+
+# Dòng credit — font chữ máy in (ESC/POS text), không dither vào ảnh.
+CREDIT_LINE = "developed by @shyn._.nguyen"
+PRINT_WIDTH_PX = 384
 
 
 class PrinterError(RuntimeError):
@@ -30,6 +36,9 @@ class PrinterError(RuntimeError):
 class POS58Printer:
     """
     Send a dithered 1-bit image to a Generic POS58 (58 mm / 384 px).
+
+    Layout (photo + template text + QR) is a pre-rendered raster. After the
+    image, only the credit line is printed with the printer's ESC/POS font.
 
     Backends:
       - ``usb``  : python-escpos Usb (default Vendor 0x0416 / Product 0x5011)
@@ -68,7 +77,6 @@ class POS58Printer:
                 "printer": self.cups_name,
                 "detail": (result.stdout or result.stderr).strip(),
             }
-        # usb
         try:
             import usb.core
 
@@ -82,18 +90,34 @@ class POS58Printer:
         except Exception as exc:  # noqa: BLE001
             return {"connected": False, "backend": "usb", "error": str(exc)}
 
-    def print_image(self, image: Image.Image | Path) -> None:
-        """Print dithered image and feed/cut paper."""
+    def print_image(
+        self,
+        image: Image.Image | Path,
+        *,
+        download_url: str = "",
+        register_url: str = "",
+    ) -> None:
+        """Print 1-bit strip (comic-dot / threshold đã xử lý ở layout)."""
+        del download_url, register_url  # QR đã nằm trong raster template
         img = self._as_image(image)
-        # Ensure 1-bit Floyd–Steinberg (idempotent if already dithered)
+        # Không Floyd lại — giữ comic-dot / floyd từ LayoutRenderer.
         if img.mode != "1":
-            img = img.convert("L").convert("1", dither=Image.Dither.FLOYDSTEINBERG)
+            img = img.convert("L").convert("1", dither=Image.Dither.NONE)
 
-        # POS58 printable width
-        if img.width != 384:
-            ratio = 384 / img.width
-            img = img.resize((384, max(1, int(img.height * ratio))), Image.Resampling.NEAREST)
-            img = img.convert("1", dither=Image.Dither.FLOYDSTEINBERG)
+        if img.width != PRINT_WIDTH_PX:
+            ratio = PRINT_WIDTH_PX / img.width
+            img = img.resize(
+                (PRINT_WIDTH_PX, max(1, int(img.height * ratio))),
+                Image.Resampling.NEAREST,
+            )
+            img = img.convert("1", dither=Image.Dither.NONE)
+
+        # Đảm bảo width chia hết 8 (GS v 0 yêu cầu width_bytes nguyên).
+        if img.width % 8 != 0:
+            pad = 8 - (img.width % 8)
+            canvas = Image.new("1", (img.width + pad, img.height), 1)
+            canvas.paste(img, (0, 0))
+            img = canvas
 
         if self.backend == "file":
             self._print_file(img)
@@ -107,14 +131,14 @@ class POS58Printer:
     def _print_usb(self, img: Image.Image) -> None:
         try:
             import usb.core
+            from escpos.constants import GS
+            from escpos.image import EscposImage
             from escpos.printer import Usb
         except ImportError as exc:
             raise PrinterError("python-escpos chưa được cài.") from exc
 
         class _UsbNoReset(Usb):
-            """POS58 clone trên macOS: ``device.reset()`` trong ``Usb._configure_usb``
-            làm handle libusb chết ngay sau đó (write dính Errno 5/32).
-            Override để chỉ ``set_configuration``, bỏ ``reset``."""
+            """POS58 clone trên macOS: bỏ ``device.reset()``; ghi USB đủ + đều nhịp."""
 
             def _configure_usb(self) -> None:
                 if not self.device:
@@ -123,17 +147,26 @@ class POS58Printer:
                     self.device.set_configuration()
                 except usb.core.USBError as exc:
                     logger.warning("USB set_configuration: %s", exc)
-                # Job trước lỗi/ngắt giữa chừng có thể để endpoint kẹt HALT
-                # → mọi write sau dính Errno 32. CLEAR_FEATURE gỡ stall mà
-                # không re-enumerate thiết bị như reset().
                 for ep in (self.out_ep, self.in_ep):
                     try:
                         self.device.clear_halt(ep)
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("USB clear_halt(0x%02x): %s", ep, exc)
 
+            def _raw(self, msg: bytes) -> None:
+                assert self.device
+                view = memoryview(msg)
+                sent = 0
+                while sent < len(view):
+                    piece = view[sent : sent + USB_WRITE_CHUNK]
+                    n = self.device.write(self.out_ep, piece, self.timeout)
+                    if n is None or n <= 0:
+                        raise PrinterError(
+                            f"USB write trả về {n} tại offset {sent}/{len(view)}"
+                        )
+                    sent += n
+
         try:
-            # timeout 30s/lần ghi — máy kẹt buffer sẽ báo lỗi thay vì treo vô hạn
             printer = _UsbNoReset(
                 self.vendor_id, self.product_id, timeout=30_000, profile="POS-5890"
             )
@@ -145,21 +178,38 @@ class POS58Printer:
             ) from exc
 
         try:
-            printer.set(align="center")
-            # Gửi raster theo dải nhỏ, tự điều tốc theo mật độ đen — xem chú
-            # thích BAND_* ở đầu file.
+            printer._raw(b"\x1b\x40")  # ESC @
+            printer._raw(bytes([0x1B, 0x37, HEAT_DOTS, HEAT_TIME, HEAT_INTERVAL]))  # ESC 7
+            printer._raw(b"\x1b\x61\x00")  # ESC a 0 — left
+
             for top in range(0, img.height, BAND_ROWS):
-                band = img.crop((0, top, img.width, min(top + BAND_ROWS, img.height)))
-                printer.image(
-                    band,
-                    impl="bitImageRaster",
-                    high_density_vertical=True,
-                    high_density_horizontal=True,
+                bottom = min(top + BAND_ROWS, img.height)
+                band = img.crop((0, top, img.width, bottom))
+                esc_im = EscposImage(band.convert("1"))
+                if esc_im.width_bytes * 8 != img.width:
+                    raise PrinterError(
+                        f"Raster width lệch: image={img.width}px nhưng "
+                        f"width_bytes={esc_im.width_bytes} ({esc_im.width_bytes * 8}px)"
+                    )
+                payload = esc_im.to_raster_format()
+                header = (
+                    GS
+                    + b"v0"
+                    + bytes((0,))
+                    + bytes(
+                        (
+                            esc_im.width_bytes & 0xFF,
+                            (esc_im.width_bytes >> 8) & 0xFF,
+                            esc_im.height & 0xFF,
+                            (esc_im.height >> 8) & 0xFF,
+                        )
+                    )
                 )
-                black_ratio = band.histogram()[0] / (band.width * band.height)
-                time.sleep(BAND_BASE_DELAY + BAND_INK_DELAY * black_ratio)
-            printer.text("\n")
-            # Feed then partial cut (POS58 supports GS V)
+                printer._raw(header + payload)
+
+            # Chỉ credit dùng font máy in; chữ QR nằm trong template.
+            printer._raw(b"\x1b\x61\x01")  # center
+            printer.text(f"\n{CREDIT_LINE}\n\n")
             try:
                 printer.cut(mode="PART")
             except Exception:  # noqa: BLE001

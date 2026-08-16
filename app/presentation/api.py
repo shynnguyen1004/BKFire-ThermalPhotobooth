@@ -28,6 +28,25 @@ PRESENTATION_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(PRESENTATION_DIR / "templates"))
 
 
+def _session_payload(result) -> dict:
+    return {
+        "ok": True,
+        "photo_id": result.photo_id,
+        "printed": result.printed,
+        "qr_url": result.qr_url,
+        "cloudinary_url": result.cloudinary_url,
+        "layout_url": f"/prints/{result.photo_id}_print.png",
+        "photo_url": f"/photos/{result.photo_id}.jpg",
+        "frame_urls": [
+            f"/photos/{result.photo_id}_{i}.jpg"
+            for i in range(1, len(result.frame_paths) + 1)
+        ],
+        "burst_count": len(result.frame_paths),
+        "message": result.message,
+        "captured_at": result.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def build_service(cfg: Settings | None = None) -> PhotoboothService:
     cfg = cfg or settings
     cfg.ensure_dirs()
@@ -59,6 +78,8 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         output_dir=cfg.prints_dir,
         portrait_aspect_w=cfg.portrait_aspect_w,
         portrait_aspect_h=cfg.portrait_aspect_h,
+        remove_background=cfg.remove_background,
+        frame_border_path=cfg.frame_border_path,
     )
     printer = POS58Printer(
         vendor_id=cfg.printer_vendor_id,
@@ -81,6 +102,7 @@ def build_service(cfg: Settings | None = None) -> PhotoboothService:
         storage=storage,
         cloudinary=cloudinary,
         qr_base_url=cfg.qr_base_url,
+        prints_dir=cfg.prints_dir,
         gphoto_mode=CaptureMode(
             burst_count=1,
             burst_interval_sec=0.0,
@@ -114,7 +136,6 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
             "index.html",
             {
                 "request": request,
-                "faculties": cfg.faculties,
                 "org_name": cfg.org_name,
                 "cloudinary_enabled": cfg.cloudinary_enabled,
                 "cloudinary_folder": cfg.cloudinary_folder,
@@ -129,36 +150,61 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
 
     @app.post("/api/capture-print")
     async def api_capture_print(
-        faculty: str = Form(...),
+        source: str = Form("auto"),
+        dither_style: str = Form("floyd"),
+        faculty: str = Form(""),
     ) -> JSONResponse:
-        if not faculty.strip():
-            raise HTTPException(status_code=400, detail="Chưa chọn Khoa / Ngành.")
+        src = (source or "auto").strip().lower()
+        if src not in ("auto", "gphoto", "webcam", "camera"):
+            raise HTTPException(
+                status_code=400,
+                detail="source phải là auto | webcam | gphoto (camera).",
+            )
+        style = (dither_style or "floyd").strip().lower()
+        if style not in ("comic", "floyd"):
+            raise HTTPException(
+                status_code=400,
+                detail="dither_style phải là comic | floyd.",
+            )
+        camera_source = None if src == "auto" else ("gphoto" if src in ("gphoto", "camera") else "webcam")
         try:
-            result = booth.capture_and_print(PrintJobRequest(faculty=faculty.strip()))
+            result = booth.capture_and_print(
+                PrintJobRequest(faculty=faculty.strip(), dither_style=style),
+                camera_source=camera_source,  # type: ignore[arg-type]
+            )
         except CameraError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             logger.exception("capture-print failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        return JSONResponse(
-            {
-                "ok": True,
-                "photo_id": result.photo_id,
-                "printed": result.printed,
-                "qr_url": result.qr_url,
-                "cloudinary_url": result.cloudinary_url,
-                "layout_url": f"/prints/{result.photo_id}_print.png",
-                "photo_url": f"/photos/{result.photo_id}.jpg",
-                "frame_urls": [
-                    f"/photos/{result.photo_id}_{i}.jpg"
-                    for i in range(1, len(result.frame_paths) + 1)
-                ],
-                "burst_count": len(result.frame_paths),
-                "message": result.message,
-                "captured_at": result.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        return JSONResponse(_session_payload(result))
+
+    @app.post("/api/reprint-last")
+    async def api_reprint_last(
+        dither_style: str = Form(""),
+        faculty: str = Form(""),
+        copies: int = Form(1),
+    ) -> JSONResponse:
+        style = (dither_style or "").strip().lower()
+        if style and style not in ("comic", "floyd"):
+            raise HTTPException(
+                status_code=400,
+                detail="dither_style phải là comic | floyd.",
+            )
+        n = max(1, min(20, int(copies or 1)))
+        try:
+            result = booth.reprint_last(
+                faculty=faculty.strip(),
+                dither_style=style,
+                copies=n,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("reprint-last failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse(_session_payload(result))
 
     @app.get("/photos/{photo_id}.jpg")
     async def get_photo(photo_id: str) -> FileResponse:

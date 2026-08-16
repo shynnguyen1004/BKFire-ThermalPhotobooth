@@ -12,12 +12,17 @@ from app.infrastructure.camera.webcam_camera import WebcamCamera
 logger = logging.getLogger(__name__)
 
 CameraBackend = Literal["auto", "gphoto", "webcam"]
+CameraSource = Literal["gphoto", "webcam"]
 
 
 class Camera(Protocol):
     def check_connection(self) -> dict: ...
 
-    def capture_photo(self, photo_id: Optional[str] = None) -> CaptureResult: ...
+    def capture_photo(
+        self,
+        photo_id: Optional[str] = None,
+        source: Optional[CameraSource] = None,
+    ) -> CaptureResult: ...
 
 
 class AutoCamera:
@@ -39,48 +44,68 @@ class AutoCamera:
         self.gphoto = gphoto
         self.webcam = webcam
         self.backend: CameraBackend = backend
-        self._last_source: Literal["gphoto", "webcam"] | None = None
+        self._last_source: CameraSource | None = None
 
     @property
-    def active_source(self) -> Literal["gphoto", "webcam"]:
+    def active_source(self) -> CameraSource:
         return self._resolve_source()
 
-    def check_connection(self) -> dict:
-        source = self._resolve_source()
-        self._last_source = source
-        if source == "gphoto":
-            status = self.gphoto.check_connection()
-            status["source"] = "gphoto"
-            status["fallback"] = False
-            return status
+    def probe_sources(self) -> dict:
+        """Independent status for both devices (for UI enable/disable)."""
+        try:
+            gphoto = self.gphoto.check_connection()
+        except Exception as exc:  # noqa: BLE001
+            gphoto = {"connected": False, "backend": "gphoto", "error": str(exc)}
+        gphoto["source"] = "gphoto"
 
-        status = self.webcam.check_connection()
-        status["source"] = "webcam"
-        status["fallback"] = self.backend == "auto"
-        if status.get("connected") and self.backend == "auto":
-            status["note"] = "Không thấy Sony — dùng camera MacBook (1 tấm 3:2 dọc)."
+        try:
+            webcam = self.webcam.check_connection()
+        except Exception as exc:  # noqa: BLE001
+            webcam = {"connected": False, "backend": "webcam", "error": str(exc)}
+        webcam["source"] = "webcam"
+
+        return {"gphoto": gphoto, "webcam": webcam}
+
+    def check_connection(self) -> dict:
+        sources = self.probe_sources()
+        source = self._resolve_source(sources=sources)
+        self._last_source = source
+        status = dict(sources[source])
+        status["source"] = source
+        status["fallback"] = self.backend == "auto" and source == "webcam"
+        status["sources"] = sources
+        if status.get("connected") and status.get("fallback"):
+            status["note"] = "Không thấy Sony — dùng camera MacBook."
         return status
 
-    def capture_photo(self, photo_id: Optional[str] = None) -> CaptureResult:
-        source = self._resolve_source()
-        self._last_source = source
-        logger.info("Capturing via %s (mode=%s)", source, self.backend)
-        if source == "gphoto":
+    def capture_photo(
+        self,
+        photo_id: Optional[str] = None,
+        source: Optional[CameraSource] = None,
+    ) -> CaptureResult:
+        use = source or self._resolve_source()
+        if use not in ("gphoto", "webcam"):
+            raise CameraError(f"Nguồn camera không hợp lệ: {use}")
+
+        sources = self.probe_sources()
+        if not sources[use].get("connected"):
+            err = sources[use].get("error") or "chưa kết nối"
+            label = "máy ảnh Sony" if use == "gphoto" else "webcam MacBook"
+            raise CameraError(f"Không dùng được {label}: {err}")
+
+        self._last_source = use
+        logger.info("Capturing via %s (mode=%s)", use, self.backend)
+        if use == "gphoto":
             return self.gphoto.capture_photo(photo_id=photo_id)
         return self.webcam.capture_photo(photo_id=photo_id)
 
-    def _resolve_source(self) -> Literal["gphoto", "webcam"]:
+    def _resolve_source(self, sources: dict | None = None) -> CameraSource:
         if self.backend == "webcam":
             return "webcam"
         if self.backend == "gphoto":
             return "gphoto"
 
-        try:
-            status = self.gphoto.check_connection()
-            if status.get("connected"):
-                return "gphoto"
-        except CameraError as exc:
-            logger.info("gphoto unavailable, falling back to webcam: %s", exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("gphoto check failed, falling back to webcam: %s", exc)
+        info = sources or self.probe_sources()
+        if info["gphoto"].get("connected"):
+            return "gphoto"
         return "webcam"

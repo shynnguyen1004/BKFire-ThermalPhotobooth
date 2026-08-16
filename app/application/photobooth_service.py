@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Literal, Optional, Protocol
 
 from app.application.layout_service import LayoutRenderer
 from app.domain.models import CaptureResult, PrintJobRequest, SessionResult
@@ -17,14 +17,22 @@ from app.infrastructure.storage.file_storage import FileStorage
 
 logger = logging.getLogger(__name__)
 
+CameraSource = Literal["gphoto", "webcam"]
+
 
 class _Camera(Protocol):
     def check_connection(self) -> dict: ...
 
-    def capture_photo(self, photo_id: Optional[str] = None) -> CaptureResult: ...
+    def capture_photo(
+        self,
+        photo_id: Optional[str] = None,
+        source: Optional[CameraSource] = None,
+    ) -> CaptureResult: ...
 
     @property
     def active_source(self) -> str: ...
+
+    def probe_sources(self) -> dict: ...
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,7 @@ class PhotoboothService:
         webcam_mode: CaptureMode | None = None,
         burst_count: int = 1,
         burst_interval_sec: float = 0.0,
+        prints_dir: Optional[Path] = None,
     ) -> None:
         self.camera = camera
         self.layout = layout
@@ -55,6 +64,7 @@ class PhotoboothService:
         self.storage = storage
         self.cloudinary = cloudinary
         self.qr_base_url = qr_base_url
+        self.prints_dir = prints_dir or getattr(layout, "output_dir", None)
         self.gphoto_mode = gphoto_mode or CaptureMode(
             burst_count=1,
             burst_interval_sec=0.0,
@@ -67,7 +77,9 @@ class PhotoboothService:
             portrait_aspect_w=3,
             portrait_aspect_h=4,
         )
+        self._last_print: dict | None = None
         self._apply_mode(self.gphoto_mode)
+        self._recover_last_print()
 
     def status(self) -> dict:
         camera_status: dict
@@ -76,13 +88,22 @@ class PhotoboothService:
         except CameraError as exc:
             camera_status = {"connected": False, "error": str(exc)}
 
+        sources = camera_status.get("sources")
+        if not sources and hasattr(self.camera, "probe_sources"):
+            try:
+                sources = self.camera.probe_sources()
+            except Exception:  # noqa: BLE001
+                sources = None
+
         source = camera_status.get("source") or getattr(self.camera, "active_source", "gphoto")
         mode = self._mode_for(str(source))
         self._apply_mode(mode)
 
         cloud = self.cloudinary.status() if self.cloudinary else {"enabled": False}
+        last = self.last_print_info()
         return {
             "camera": camera_status,
+            "cameras": sources,
             "printer": self.printer.check_connection(),
             "cloudinary": cloud,
             "burst": {
@@ -91,80 +112,132 @@ class PhotoboothService:
                 "aspect": f"{self.layout.portrait_aspect_w}:{self.layout.portrait_aspect_h}",
                 "source": source,
             },
+            "last_print": last,
         }
 
-    def capture_and_print(self, request: PrintJobRequest) -> SessionResult:
-        source = getattr(self.camera, "active_source", "gphoto")
+    def last_print_info(self) -> dict | None:
+        if not self._last_print:
+            self._recover_last_print()
+        if not self._last_print:
+            return None
+        return dict(self._last_print)
+
+    def capture_and_print(
+        self,
+        request: PrintJobRequest,
+        camera_source: Optional[CameraSource] = None,
+    ) -> SessionResult:
+        source: CameraSource
+        if camera_source in ("gphoto", "webcam"):
+            source = camera_source
+        else:
+            active = getattr(self.camera, "active_source", "webcam")
+            source = active if active in ("gphoto", "webcam") else "webcam"
+
         mode = self._mode_for(str(source))
         self._apply_mode(mode)
 
         session_id = request.photo_id or SessionResult.new_id()
         logger.info(
-            "Session %s — faculty=%s — source=%s — burst %sx%.1fs — aspect %s:%s",
+            "Session %s — source=%s — dither=%s — aspect %s:%s",
             session_id,
-            request.faculty,
             source,
-            self.burst_count,
-            self.burst_interval_sec,
+            request.dither_style,
             self.layout.portrait_aspect_w,
             self.layout.portrait_aspect_h,
         )
 
-        frame_paths = self._capture_burst(session_id)
+        frame_paths = self._capture_burst(session_id, camera_source=source)
         download_path = self.layout.render_photo_color(frame_paths, session_id)
-        # Also keep a convenience copy as session.jpg (served at /photos/{id}.jpg)
         main_photo = self.storage.archive_photo(download_path, session_id)
 
-        cloudinary_url: str | None = None
-        # QR luôn dùng link ngắn — ô QR trên template chỉ 62 px, dán thẳng
-        # secure_url Cloudinary (~95 ký tự) sẽ không quét được.
         qr_url = self._fallback_qr(request.qr_base_url, session_id)
         upload_note = ""
+        cloudinary_url: str | None = None
+        print_asset_id = f"{session_id}_print"
+
+        # QR trỏ tới full layout trên Cloudinary (dự đoán URL trước khi upload).
+        if self.cloudinary and self.cloudinary.enabled:
+            try:
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
+            except CloudinaryError:
+                download_qr = qr_url
+        else:
+            download_qr = qr_url
+            upload_note = " (Cloudinary chưa cấu hình — ảnh chỉ có trên máy local)"
+
+        dither = request.dither_style if request.dither_style in ("comic", "floyd") else "floyd"
+        layout_path = self.layout.render_to_path(
+            photo_paths=frame_paths,
+            qr_url=download_qr,
+            photo_id=session_id,
+            dither_style=dither,  # type: ignore[arg-type]
+        )
 
         if self.cloudinary and self.cloudinary.enabled:
             try:
-                cloudinary_url = self.cloudinary.upload_photo(download_path, f"{session_id}_photo")
+                cloudinary_url = self.cloudinary.upload_photo(
+                    layout_path,
+                    print_asset_id,
+                    image_format="png",
+                )
+                # Giữ URL ổn định (không version) trong QR / response nếu có thể.
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
             except CloudinaryError as exc:
                 logger.exception("Cloudinary upload failed for %s", session_id)
                 upload_note = f" Upload Cloudinary lỗi: {exc}"
-        else:
-            upload_note = " (Cloudinary chưa cấu hình — ảnh chỉ có trên máy local)"
+                download_qr = qr_url
+                layout_path = self.layout.render_to_path(
+                    photo_paths=frame_paths,
+                    qr_url=download_qr,
+                    photo_id=session_id,
+                    dither_style=dither,  # type: ignore[arg-type]
+                )
 
-        layout_path = self.layout.render_to_path(
-            photo_paths=frame_paths,
-            qr_url=qr_url,
-            photo_id=session_id,
-        )
+        register_qr = (self.layout.register_qr_url or "").strip()
 
         shot_label = f"{self.burst_count} tấm" if self.burst_count > 1 else "1 tấm"
         printed = False
-        message = f"Đã chụp {shot_label} ({source}) & render layout.{upload_note}"
+        style_label = "comic-dot" if dither == "comic" else "Floyd–Steinberg"
+        message = f"Đã chụp {shot_label} ({source}, {style_label}) & render layout.{upload_note}"
         try:
-            self.printer.print_image(layout_path)
+            self.printer.print_image(
+                layout_path,
+                download_url=download_qr,
+                register_url=register_qr,
+            )
             printed = True
-            message = f"Đã chụp {shot_label} ({source}), upload, in thành công.{upload_note}"
+            message = (
+                f"Đã chụp {shot_label} ({source}, {style_label}), upload, in thành công.{upload_note}"
+            )
         except PrinterError as exc:
             message = f"Đã chụp & render, nhưng in thất bại: {exc}.{upload_note}"
             logger.exception("Print failed for %s", session_id)
 
-        return SessionResult(
+        result = SessionResult(
             photo_id=session_id,
-            faculty=request.faculty,
+            faculty=request.faculty or "",
             source_path=main_photo,
             layout_path=layout_path,
-            qr_url=qr_url,
+            qr_url=download_qr,
             printed=printed,
             message=message,
             cloudinary_url=cloudinary_url,
             frame_paths=frame_paths,
         )
+        self._remember_print(result, camera_source=source, dither_style=dither)
+        return result
 
-    def _capture_burst(self, session_id: str) -> list[Path]:
+    def _capture_burst(
+        self,
+        session_id: str,
+        camera_source: Optional[CameraSource] = None,
+    ) -> list[Path]:
         frames: list[Path] = []
         for i in range(1, self.burst_count + 1):
             frame_id = f"{session_id}_f{i}"
             logger.info("Burst %s/%s — capturing %s", i, self.burst_count, frame_id)
-            capture = self.camera.capture_photo(photo_id=frame_id)
+            capture = self.camera.capture_photo(photo_id=frame_id, source=camera_source)
             archived = self.storage.archive_frame(capture.local_path, session_id, i)
             frames.append(archived)
             if i < self.burst_count and self.burst_interval_sec > 0:
@@ -172,7 +245,14 @@ class PhotoboothService:
                 time.sleep(self.burst_interval_sec)
         return frames
 
-    def reprint(self, photo_id: str, faculty: str, qr_base_url: str = "") -> SessionResult:
+    def reprint(
+        self,
+        photo_id: str,
+        faculty: str = "",
+        qr_base_url: str = "",
+        dither_style: str = "floyd",
+        copies: int = 1,
+    ) -> SessionResult:
         frames = self.storage.get_session_frames(photo_id)
         if not frames:
             source = self.storage.get_photo(photo_id)
@@ -182,26 +262,85 @@ class PhotoboothService:
 
         cloudinary_url: str | None = None
         qr_url = self._fallback_qr(qr_base_url, photo_id)
+        print_asset_id = f"{photo_id}_print"
         if self.cloudinary and self.cloudinary.enabled:
-            photo_color = self.layout.render_photo_color(frames, photo_id)
-            cloudinary_url = self.cloudinary.upload_photo(photo_color, f"{photo_id}_photo")
+            try:
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
+            except CloudinaryError:
+                download_qr = qr_url
+        else:
+            download_qr = qr_url
 
+        dither = dither_style if dither_style in ("comic", "floyd") else "floyd"
         layout_path = self.layout.render_to_path(
             photo_paths=frames,
-            qr_url=qr_url,
+            qr_url=download_qr,
             photo_id=photo_id,
+            dither_style=dither,  # type: ignore[arg-type]
         )
-        self.printer.print_image(layout_path)
-        return SessionResult(
+
+        if self.cloudinary and self.cloudinary.enabled:
+            try:
+                cloudinary_url = self.cloudinary.upload_photo(
+                    layout_path,
+                    print_asset_id,
+                    image_format="png",
+                )
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
+            except CloudinaryError as exc:
+                logger.warning("Reprint Cloudinary upload failed: %s", exc)
+                download_qr = qr_url
+                layout_path = self.layout.render_to_path(
+                    photo_paths=frames,
+                    qr_url=download_qr,
+                    photo_id=photo_id,
+                    dither_style=dither,  # type: ignore[arg-type]
+                )
+
+        register_qr = (self.layout.register_qr_url or "").strip()
+        copies = max(1, min(20, int(copies or 1)))
+        for i in range(copies):
+            self.printer.print_image(
+                layout_path,
+                download_url=download_qr,
+                register_url=register_qr,
+            )
+            if i + 1 < copies:
+                logger.info("Reprint copy %s/%s done", i + 1, copies)
+        copies_note = f" ×{copies}" if copies > 1 else ""
+        result = SessionResult(
             photo_id=photo_id,
-            faculty=faculty,
+            faculty=faculty or "",
             source_path=frames[0],
             layout_path=layout_path,
-            qr_url=qr_url,
+            qr_url=download_qr,
             printed=True,
-            message="In lại thành công.",
+            message=(
+                f"In lại thành công{copies_note} "
+                f"({'comic-dot' if dither == 'comic' else 'Floyd–Steinberg'})."
+            ),
             cloudinary_url=cloudinary_url,
             frame_paths=frames,
+        )
+        self._remember_print(result, dither_style=dither)
+        return result
+
+    def reprint_last(
+        self,
+        faculty: str = "",
+        dither_style: str = "",
+        copies: int = 1,
+    ) -> SessionResult:
+        info = self.last_print_info()
+        if not info or not info.get("photo_id"):
+            raise FileNotFoundError("Chưa có lần in nào để in lại.")
+        use_faculty = (faculty or info.get("faculty") or "").strip()
+        use_style = dither_style if dither_style in ("comic", "floyd") else (info.get("dither_style") or "floyd")
+        return self.reprint(
+            photo_id=info["photo_id"],
+            faculty=use_faculty,
+            dither_style=str(use_style),
+            copies=copies,
         )
 
     def demo_from_image(
@@ -218,42 +357,114 @@ class PhotoboothService:
 
         cloudinary_url: str | None = None
         qr_url = self._fallback_qr(qr_base_url, session_id)
+        print_asset_id = f"{session_id}_print"
         if self.cloudinary and self.cloudinary.enabled:
             try:
-                cloudinary_url = self.cloudinary.upload_photo(download_path, f"{session_id}_photo")
-            except CloudinaryError as exc:
-                logger.warning("Demo Cloudinary upload failed: %s", exc)
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
+            except CloudinaryError:
+                download_qr = qr_url
+        else:
+            download_qr = qr_url
 
         layout_path = self.layout.render_to_path(
             photo_paths=frames,
-            qr_url=qr_url,
+            qr_url=download_qr,
             photo_id=session_id,
         )
+
+        if self.cloudinary and self.cloudinary.enabled:
+            try:
+                cloudinary_url = self.cloudinary.upload_photo(
+                    layout_path,
+                    print_asset_id,
+                    image_format="png",
+                )
+                download_qr = self.cloudinary.expected_url(print_asset_id, ext="png")
+            except CloudinaryError as exc:
+                logger.warning("Demo Cloudinary upload failed: %s", exc)
+                download_qr = qr_url
+                layout_path = self.layout.render_to_path(
+                    photo_paths=frames,
+                    qr_url=download_qr,
+                    photo_id=session_id,
+                )
+
+        register_qr = (self.layout.register_qr_url or "").strip()
         printed = False
         message = "Demo đã render."
         try:
-            self.printer.print_image(layout_path)
+            self.printer.print_image(
+                layout_path,
+                download_url=download_qr,
+                register_url=register_qr,
+            )
             printed = True
             message = "Demo: layout + in thành công."
         except PrinterError as exc:
             message = f"Demo: render OK, in thất bại: {exc}"
-        return SessionResult(
+        result = SessionResult(
             photo_id=session_id,
             faculty=faculty,
             source_path=main_photo,
             layout_path=layout_path,
-            qr_url=qr_url,
+            qr_url=download_qr,
             printed=printed,
             message=message,
             cloudinary_url=cloudinary_url,
             frame_paths=frames,
         )
+        self._remember_print(result)
+        return result
+
+    def _remember_print(
+        self,
+        result: SessionResult,
+        camera_source: Optional[str] = None,
+        dither_style: Optional[str] = None,
+    ) -> None:
+        self._last_print = {
+            "photo_id": result.photo_id,
+            "faculty": result.faculty,
+            "printed": result.printed,
+            "layout_url": f"/prints/{result.photo_id}_print.png",
+            "photo_url": f"/photos/{result.photo_id}.jpg",
+            "source": camera_source,
+            "dither_style": dither_style or "floyd",
+            "captured_at": result.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _recover_last_print(self) -> None:
+        if self._last_print or not self.prints_dir:
+            return
+        prints = sorted(
+            self.prints_dir.glob("*_print.png"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for path in prints:
+            photo_id = path.name[: -len("_print.png")]
+            if not photo_id:
+                continue
+            frames = self.storage.get_session_frames(photo_id)
+            photo = self.storage.get_photo(photo_id)
+            if not frames and photo is None:
+                continue
+            self._last_print = {
+                "photo_id": photo_id,
+                "faculty": "",
+                "printed": True,
+                "layout_url": f"/prints/{photo_id}_print.png",
+                "photo_url": f"/photos/{photo_id}.jpg",
+                "source": None,
+                "dither_style": "floyd",
+                "captured_at": None,
+            }
+            return
 
     def _mode_for(self, source: str) -> CaptureMode:
         return self.webcam_mode if source == "webcam" else self.gphoto_mode
 
     def _apply_mode(self, mode: CaptureMode) -> None:
-        # Luôn 1 tấm giữa phiếu — không còn grid 2×2 / burst nhiều khung
         self.burst_count = 1
         self.burst_interval_sec = 0.0
         self.layout.portrait_aspect_w = mode.portrait_aspect_w
@@ -265,4 +476,4 @@ class PhotoboothService:
             return base.replace("{id}", photo_id)
         if base:
             return f"{base.rstrip('/')}/{photo_id}"
-        return f"https://res.cloudinary.com/pending/image/upload/{photo_id}_photo.jpg"
+        return f"https://res.cloudinary.com/pending/image/upload/{photo_id}_print.png"

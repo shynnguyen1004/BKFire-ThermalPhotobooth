@@ -37,6 +37,8 @@ def main() -> None:
         output_dir=settings.prints_dir,
         portrait_aspect_w=settings.portrait_aspect_w,
         portrait_aspect_h=settings.portrait_aspect_h,
+        remove_background=settings.remove_background,
+        frame_border_path=settings.frame_border_path,
     )
     service = PhotoboothService(
         camera=GPhotoCamera(temp_dir=settings.temp_dir),

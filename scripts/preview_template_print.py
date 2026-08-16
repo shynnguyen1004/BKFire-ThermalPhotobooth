@@ -47,6 +47,8 @@ def main() -> None:
     renderer = LayoutRenderer(
         template_path=settings.print_template_path,
         register_qr_url=settings.register_qr_url,
+        remove_background=settings.remove_background,
+        frame_border_path=settings.frame_border_path,
     )
     strip = renderer.render(photo, qr_url=qr_url, save=False)
     out = out_dir / "pipeline_single.png"
@@ -61,7 +63,11 @@ def main() -> None:
             backend=settings.printer_backend,  # type: ignore[arg-type]
             dry_run_dir=settings.prints_dir,
         )
-        printer.print_image(strip)
+        printer.print_image(
+            strip,
+            download_url=qr_url,
+            register_url=settings.register_qr_url,
+        )
         print(f"printed via {settings.printer_backend}")
 
 

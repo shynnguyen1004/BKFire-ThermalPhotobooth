@@ -28,8 +28,10 @@ class Settings(BaseSettings):
     # Branding
     org_name: str = "BK FIRE"
 
-    # Print template — mọi chữ/logo cố định nằm sẵn trong file (384x955 @ 203 DPI)
+    # Print template — chữ/logo/QR frames cố định (384x955 @ 203 DPI)
     print_template_path: Path = ROOT_DIR / "assets" / "print_template.png"
+    # Film-strip overlay chèn lên ảnh sau khi chụp (RGBA, vùng trong suốt = ảnh)
+    frame_border_path: Path = ROOT_DIR / "assets" / "frame_border.png"
 
     # Print layout (POS58: 384 px @ 203 DPI)
     print_width_px: int = 384
@@ -42,11 +44,11 @@ class Settings(BaseSettings):
     # legacy alias — same as photos_dir
     uploads_dir: Path = ROOT_DIR / "data" / "photos"
 
-    # QR download (góc trái phiếu in) — luôn dùng link ngắn redirect tới ảnh,
-    # `{id}` thay bằng photo id. Giữ URL ≤ ~50 ký tự để QR 62 px còn quét được.
+    # QR download fallback khi chưa có Cloudinary — `{id}` = photo id.
+    # Khi upload OK, phiếu in dùng luôn secure_url Cloudinary.
     qr_base_url: str = "https://my-photobooth.app/photo/{id}"
 
-    # QR "SCAN TO REGISTER" (góc phải) — placeholder cho tới khi có link thật
+    # QR "SCAN TO REGISTER" — Google Form (placeholder tới khi có link thật)
     register_qr_url: str = "https://www.youtube.com"
 
     # Cloudinary (QR uses secure_url after upload)
@@ -99,6 +101,9 @@ class Settings(BaseSettings):
     webcam_burst_interval_sec: float = 0.0
     webcam_portrait_aspect_w: int = 3
     webcam_portrait_aspect_h: int = 4
+
+    # Print photo processing
+    remove_background: bool = False  # tách nền off — giữ nền chụp; midtone da xử lý bằng tone curve
 
     # Web
     host: str = "0.0.0.0"
