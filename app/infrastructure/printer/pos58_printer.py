@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -13,10 +14,18 @@ logger = logging.getLogger(__name__)
 
 Backend = Literal["usb", "cups", "file"]
 
-# Máy clone POS58 buffer nhỏ — chia GS v 0 thành dải nhỏ.
-# Không sleep giữa các dải: nghỉ sẽ tạo “sọc/gap” ngang trên ảnh.
-BAND_ROWS = 48          # 48×48 byte ≈ 2.3 KB / lệnh
-# Gửi cả khối GS v 0 trong một USB write nếu vừa.
+# Máy clone POS58: buffer nhỏ, gần như không có flow-control.
+# Đẩy GS v 0 nhanh hơn tốc độ in → rơi byte → lệch sync → in “mã rác”
+# (phần raster bị hiểu nhầm thành text) xen giữa các dải ảnh.
+#
+# Chiến lược: chia dải nhỏ + nhịp theo thời gian in thật của dải
+# (≈ bằng thời gian đầu nhiệt in xong dải) → không tràn buffer mà
+# cũng không nghỉ lâu đến mức tạo sọc trắng như delay cũ.
+BAND_ROWS = 24          # 24×48 byte ≈ 1.15 KB / lệnh — an toàn hơn 48
+# 203 DPI → 24 hàng ≈ 3.0 mm. POS58 ~70–90 mm/s → ~0.04–0.05 s/dải.
+BAND_PACE_SEC = 0.045
+# Nghỉ sau mỗi job (cut xong) trước khi job/copy kế — buffer + cơ cắt kịp.
+JOB_SETTLE_SEC = 0.45
 USB_WRITE_CHUNK = 4096
 
 # ESC 7 — heat (n2 càng cao càng đen).
@@ -24,9 +33,13 @@ HEAT_DOTS = 7
 HEAT_TIME = 80
 HEAT_INTERVAL = 2
 
+# Dòng ngang “mồi” trước layout — giúp sync raster, giảm wrap logo header.
+LEADER_LINE_PX = 4
+LEADER_PAD_PX = 2          # trắng trên/dưới line
+PRINT_WIDTH_PX = 384
+
 # Dòng credit — font chữ máy in (ESC/POS text), không dither vào ảnh.
 CREDIT_LINE = "developed by @shyn._.nguyen"
-PRINT_WIDTH_PX = 384
 
 
 class PrinterError(RuntimeError):
@@ -178,34 +191,26 @@ class POS58Printer:
             ) from exc
 
         try:
+            # Init sạch — quan trọng khi in liên tiếp (buffer còn sót từ job trước).
             printer._raw(b"\x1b\x40")  # ESC @
+            time.sleep(0.05)
             printer._raw(bytes([0x1B, 0x37, HEAT_DOTS, HEAT_TIME, HEAT_INTERVAL]))  # ESC 7
             printer._raw(b"\x1b\x61\x00")  # ESC a 0 — left
+
+            # Line ngang full-width trước layout — mồi sync, tránh wrap logo đầu phiếu.
+            leader = self._leader_line_image(img.width)
+            self._usb_send_band(printer, leader, EscposImage, GS)
+            time.sleep(BAND_PACE_SEC)
 
             for top in range(0, img.height, BAND_ROWS):
                 bottom = min(top + BAND_ROWS, img.height)
                 band = img.crop((0, top, img.width, bottom))
-                esc_im = EscposImage(band.convert("1"))
-                if esc_im.width_bytes * 8 != img.width:
-                    raise PrinterError(
-                        f"Raster width lệch: image={img.width}px nhưng "
-                        f"width_bytes={esc_im.width_bytes} ({esc_im.width_bytes * 8}px)"
-                    )
-                payload = esc_im.to_raster_format()
-                header = (
-                    GS
-                    + b"v0"
-                    + bytes((0,))
-                    + bytes(
-                        (
-                            esc_im.width_bytes & 0xFF,
-                            (esc_im.width_bytes >> 8) & 0xFF,
-                            esc_im.height & 0xFF,
-                            (esc_im.height >> 8) & 0xFF,
-                        )
-                    )
-                )
-                printer._raw(header + payload)
+                self._usb_send_band(printer, band, EscposImage, GS)
+                # Nhịp ≈ thời gian in dải — giữ đầu nhiệt chạy liên tục, tránh tràn buffer.
+                rows = bottom - top
+                pace = BAND_PACE_SEC * (rows / BAND_ROWS)
+                if pace > 0:
+                    time.sleep(pace)
 
             # Chỉ credit dùng font máy in; chữ QR nằm trong template.
             printer._raw(b"\x1b\x61\x01")  # center
@@ -214,6 +219,8 @@ class POS58Printer:
                 printer.cut(mode="PART")
             except Exception:  # noqa: BLE001
                 printer.cut()
+            # Cho cơ cắt + buffer kịp trước job kế (copies / in liên tiếp).
+            time.sleep(JOB_SETTLE_SEC)
             logger.info("Printed via USB ESC/POS")
         except Exception as exc:  # noqa: BLE001
             raise PrinterError(f"Lỗi khi in ESC/POS: {exc}") from exc
@@ -222,6 +229,41 @@ class POS58Printer:
                 printer.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    @staticmethod
+    def _leader_line_image(width: int) -> Image.Image:
+        """Ảnh 1-bit: pad trắng + line đen ngang LEADER_LINE_PX."""
+        height = LEADER_PAD_PX + LEADER_LINE_PX + LEADER_PAD_PX
+        img = Image.new("1", (width, height), 1)
+        y0 = LEADER_PAD_PX
+        y1 = y0 + LEADER_LINE_PX
+        black = Image.new("1", (width, LEADER_LINE_PX), 0)
+        img.paste(black, (0, y0))
+        return img
+
+    @staticmethod
+    def _usb_send_band(printer, band: Image.Image, escpos_image_cls, gs) -> None:
+        esc_im = escpos_image_cls(band.convert("1"))
+        if esc_im.width_bytes * 8 != band.width:
+            raise PrinterError(
+                f"Raster width lệch: image={band.width}px nhưng "
+                f"width_bytes={esc_im.width_bytes} ({esc_im.width_bytes * 8}px)"
+            )
+        payload = esc_im.to_raster_format()
+        header = (
+            gs
+            + b"v0"
+            + bytes((0,))
+            + bytes(
+                (
+                    esc_im.width_bytes & 0xFF,
+                    (esc_im.width_bytes >> 8) & 0xFF,
+                    esc_im.height & 0xFF,
+                    (esc_im.height >> 8) & 0xFF,
+                )
+            )
+        )
+        printer._raw(header + payload)
 
     def _print_cups(self, img: Image.Image) -> None:
         if not self.dry_run_dir:

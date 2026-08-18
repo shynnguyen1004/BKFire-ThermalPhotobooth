@@ -25,6 +25,8 @@ from config.settings import Settings, settings
 logger = logging.getLogger(__name__)
 
 PRESENTATION_DIR = Path(__file__).resolve().parent
+ROOT_DIR = PRESENTATION_DIR.parent.parent
+FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 TEMPLATES = Jinja2Templates(directory=str(PRESENTATION_DIR / "templates"))
 
 
@@ -130,8 +132,32 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
     static_dir.mkdir(exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request) -> HTMLResponse:
+    spa_enabled = (FRONTEND_DIST / "index.html").is_file()
+    if spa_enabled:
+        assets_dir = FRONTEND_DIST / "assets"
+        img_dir = FRONTEND_DIST / "img"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="spa_assets")
+        if img_dir.is_dir():
+            app.mount("/img", StaticFiles(directory=str(img_dir)), name="spa_img")
+        logger.info("Serving React SPA from %s", FRONTEND_DIST)
+
+    @app.get("/api/config")
+    async def api_config() -> JSONResponse:
+        return JSONResponse(
+            {
+                "org_name": cfg.org_name,
+                "cloudinary_enabled": cfg.cloudinary_enabled,
+                "cloudinary_folder": cfg.cloudinary_folder,
+                "burst_count": cfg.burst_count,
+                "burst_interval_sec": cfg.burst_interval_sec,
+            }
+        )
+
+    @app.get("/")
+    async def index(request: Request):
+        if spa_enabled:
+            return FileResponse(FRONTEND_DIST / "index.html")
         return TEMPLATES.TemplateResponse(
             "index.html",
             {
@@ -225,6 +251,8 @@ def create_app(cfg: Settings | None = None, service: Optional[PhotoboothService]
         path = booth.storage.get_photo(photo_id)
         if path is None:
             raise HTTPException(status_code=404, detail="Photo not found")
+        if spa_enabled:
+            return FileResponse(FRONTEND_DIST / "index.html")
         return TEMPLATES.TemplateResponse(
             "photo.html",
             {

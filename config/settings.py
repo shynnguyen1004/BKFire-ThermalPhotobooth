@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     )
 
     # Branding
-    org_name: str = "BK FIRE"
+    org_name: str = "BKFIRE"
 
     # Print template — chữ/logo/QR frames cố định (384x955 @ 203 DPI)
     print_template_path: Path = ROOT_DIR / "assets" / "print_template.png"
